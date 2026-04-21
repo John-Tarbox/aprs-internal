@@ -21,7 +21,7 @@ database_id = "45c19003-01a7-4f79-8aed-fd7cbf2b64d6"
 [vars]
 ENVIRONMENT = "production"
 OKTA_DOMAIN = "aprsfoundation.okta.com"
-OKTA_CLIENT_ID = "REPLACE_AFTER_OKTA_APP_REGISTERED"
+OKTA_CLIENT_ID = "0oa22i75bs5uDKDrT1d8"
 SITE_URL = "https://internal.aprsfoundation.org"
 
 # Secrets (set via `wrangler secret put`, NOT here):
