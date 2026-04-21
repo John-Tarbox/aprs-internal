@@ -20,7 +20,9 @@ interface KanbanPageProps {
   user: AuthUser;
 }
 
-const COLUMNS: Array<{ key: string; label: string }> = [
+import type { ColumnName } from '../services/kanban.service';
+
+export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
   { key: 'not_started', label: 'Not Started' },
   { key: 'started', label: 'Started' },
   { key: 'blocked', label: 'Blocked' },

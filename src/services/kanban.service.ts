@@ -77,6 +77,26 @@ function hydrateCard(row: RawCardRow): CardDto {
   };
 }
 
+/** Count cards per column. Every column is present in the result, zero-filled. */
+export async function getColumnCounts(
+  db: D1Database
+): Promise<Record<ColumnName, number>> {
+  const zeroed = KANBAN_COLUMNS.reduce(
+    (acc, col) => {
+      acc[col] = 0;
+      return acc;
+    },
+    {} as Record<ColumnName, number>
+  );
+  const res = await db
+    .prepare(`SELECT column_name, COUNT(*) as c FROM kanban_cards GROUP BY column_name`)
+    .all<{ column_name: ColumnName; c: number }>();
+  for (const row of res.results ?? []) {
+    if (row.column_name in zeroed) zeroed[row.column_name] = row.c;
+  }
+  return zeroed;
+}
+
 export async function listCards(db: D1Database): Promise<CardDto[]> {
   const res = await db
     .prepare(

@@ -13,6 +13,7 @@ import type { AppEnv } from '../env';
 import { LoginPage } from '../pages/LoginPage';
 import { HomePage } from '../pages/HomePage';
 import { AccessDeniedPage } from '../pages/AccessDeniedPage';
+import { getColumnCounts } from '../services/kanban.service';
 
 export const publicPageRoutes = new Hono<AppEnv>();
 
@@ -31,7 +32,8 @@ publicPageRoutes.get('/access-denied', (c) => {
 
 export const authedPageRoutes = new Hono<AppEnv>();
 
-authedPageRoutes.get('/', (c) => {
+authedPageRoutes.get('/', async (c) => {
   const user = c.get('user');
-  return c.html(<HomePage user={user} />);
+  const kanbanCounts = await getColumnCounts(c.env.DB);
+  return c.html(<HomePage user={user} kanbanCounts={kanbanCounts} />);
 });
