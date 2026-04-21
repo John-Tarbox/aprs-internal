@@ -1,0 +1,34 @@
+name = "aprs-internal"
+main = "src/index.ts"
+compatibility_date = "2025-04-15"
+compatibility_flags = ["nodejs_compat"]
+
+# SAFETY: pin the account so wrangler refuses to deploy if the active token
+# belongs to a different Cloudflare account. See memory:
+# feedback_cloudflare_accounts — before any wrangler command, run `wrangler whoami`
+# and verify this account id.
+account_id = "d8e848325a1b3c22b7631ed3f51eecdb"
+
+routes = [
+  { pattern = "internal.aprsfoundation.org", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aprs-internal-db"
+database_id = "45c19003-01a7-4f79-8aed-fd7cbf2b64d6"
+
+[vars]
+ENVIRONMENT = "production"
+OKTA_DOMAIN = "aprsfoundation.okta.com"
+OKTA_CLIENT_ID = "REPLACE_AFTER_OKTA_APP_REGISTERED"
+SITE_URL = "https://internal.aprsfoundation.org"
+
+# Secrets (set via `wrangler secret put`, NOT here):
+#   OKTA_CLIENT_SECRET
+#   GOOGLE_CLIENT_ID
+#   GOOGLE_CLIENT_SECRET
+#   SESSION_SECRET
+
+[dev]
+port = 8788

@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.git-credentials.env
+*.log
+dist/
+.DS_Store
