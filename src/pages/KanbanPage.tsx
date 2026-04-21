@@ -91,6 +91,9 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user }) => {
 };
 
 const kanbanCss = `
+  /* Break out of Layout's .main max-width: 960px; 6 columns need ~1200px. */
+  body:has(.kanban-board) .main { max-width: none; padding: 0 16px; }
+
   .kanban-head { display: flex; align-items: center; gap: 16px; }
   .kanban-head h1 { margin: 0; }
   .kanban-status { font-size: 0.85em; padding: 4px 10px; border-radius: 999px; }
