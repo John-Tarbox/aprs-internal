@@ -23,7 +23,9 @@ import { SESSION_COOKIE_NAME } from '../middleware/auth';
 
 const OKTA_SESSION_TTL = 7 * 24 * 60 * 60;   // 7 days
 const GOOGLE_SESSION_TTL = 8 * 60 * 60;      // 8 hours
-const DEFAULT_NEW_USER_ROLE: RoleName = 'viewer';
+// Okta auto-provisions anyone in the APRS Foundation tenant as staff on
+// first sign-in. Google users remain admin-invite-only (see /google/callback).
+const DEFAULT_NEW_USER_ROLE: RoleName = 'staff';
 
 export const authRoutes = new Hono<AppEnv>();
 
