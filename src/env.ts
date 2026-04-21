@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  KANBAN_DO: DurableObjectNamespace;
 
   ENVIRONMENT: 'production' | 'development';
   OKTA_DOMAIN: string;

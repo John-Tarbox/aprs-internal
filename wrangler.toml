@@ -18,6 +18,14 @@ binding = "DB"
 database_name = "aprs-internal-db"
 database_id = "45c19003-01a7-4f79-8aed-fd7cbf2b64d6"
 
+[[durable_objects.bindings]]
+name = "KANBAN_DO"
+class_name = "KanbanBoardDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["KanbanBoardDO"]
+
 [vars]
 ENVIRONMENT = "production"
 OKTA_DOMAIN = "aprsfoundation.okta.com"

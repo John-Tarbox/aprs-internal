@@ -46,9 +46,15 @@ function redirectToLogin(currentPath: string): Response {
 
 export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
   // Dev mock — only honored when ENVIRONMENT=development.
+  // Query-param fallback (`?mockEmail=...&mockRole=...`) is for scenarios
+  // where request headers can't be set from the caller (e.g. browsers
+  // initiating a WebSocket upgrade for multi-user local testing).
   if (c.env.ENVIRONMENT === 'development') {
-    const mockEmail = c.req.header('X-Mock-User-Email');
-    const mockRole = (c.req.header('X-Mock-User-Role') as RoleName | undefined) ?? 'viewer';
+    const mockEmail = c.req.header('X-Mock-User-Email') ?? c.req.query('mockEmail');
+    const mockRole =
+      (c.req.header('X-Mock-User-Role') as RoleName | undefined) ??
+      (c.req.query('mockRole') as RoleName | undefined) ??
+      'viewer';
     if (mockEmail) {
       const existing = await findUserByEmail(c.env.DB, mockEmail);
       const roles = existing ? await getUserRoles(c.env.DB, existing.id) : [mockRole];

@@ -17,7 +17,12 @@ import { healthRoutes } from './routes/health.routes';
 import { authRoutes } from './routes/auth.routes';
 import { publicPageRoutes, authedPageRoutes } from './routes/page.routes';
 import { adminRoutes } from './routes/admin.routes';
+import { kanbanRoutes } from './routes/kanban.routes';
 import { authMiddleware, requireRole } from './middleware/auth';
+
+// Re-exported at module level so the Workers runtime can find the class
+// referenced by wrangler.toml's [[durable_objects.bindings]] class_name.
+export { KanbanBoardDO } from './durable/kanban.do';
 
 const app = new Hono<AppEnv>();
 
@@ -33,6 +38,8 @@ app.use('*', authMiddleware);
 
 app.use('/admin/*', requireRole('admin'));
 app.route('/admin', adminRoutes);
+
+app.route('/kanban', kanbanRoutes);
 
 app.route('/', authedPageRoutes);      // /
 
