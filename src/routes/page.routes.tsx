@@ -19,7 +19,8 @@ export const publicPageRoutes = new Hono<AppEnv>();
 publicPageRoutes.get('/login', (c) => {
   const next = c.req.query('next');
   const error = c.req.query('error');
-  return c.html(<LoginPage next={next} error={error} />);
+  const googleEnabled = Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET);
+  return c.html(<LoginPage next={next} error={error} googleEnabled={googleEnabled} />);
 });
 
 publicPageRoutes.get('/access-denied', (c) => {

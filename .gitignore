@@ -3,6 +3,8 @@ node_modules/
 .dev.vars
 .env
 .git-credentials.env
+.okta-credentials.env
+.google-credentials.env
 *.log
 dist/
 .DS_Store

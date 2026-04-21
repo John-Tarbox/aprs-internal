@@ -7,8 +7,10 @@ export interface Env {
   SITE_URL: string;
 
   OKTA_CLIENT_SECRET: string;
-  GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
+  // Google is optional — sign-in with Google is disabled when these are missing.
+  // See `googleConfigured()` in src/routes/auth.routes.ts.
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   SESSION_SECRET: string;
 }
 

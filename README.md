@@ -22,8 +22,8 @@ Google sign-in from an email NOT on the allow-list is rejected with an "ask an a
 2. **Okta OIDC app** registered in the APRS Okta admin console, with redirects:
    - `https://internal.aprsfoundation.org/auth/okta/callback`
    - `http://localhost:8788/auth/okta/callback`
-3. **Google OAuth client** in any Google Cloud Console project, "Web application" type, same two redirect URIs. OAuth consent screen should be published (not "testing") so arbitrary Gmail users can sign in without the unverified-app warning.
-4. Secrets set via `wrangler secret put`: `OKTA_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET` (`openssl rand -hex 32`).
+3. **(Optional, can be added later)** **Google OAuth client** in any Google Cloud Console project, "Web application" type, same two redirect URIs. OAuth consent screen should be published (not "testing") so arbitrary Gmail users can sign in without the unverified-app warning. When `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are not set, the "Sign in with Google" button is hidden and the `/auth/google/*` routes redirect to `/login` with a friendly message.
+4. Secrets set via `wrangler secret put`: `OKTA_CLIENT_SECRET`, `SESSION_SECRET` (`openssl rand -hex 32`), and — once Google is set up — `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 
 ## First-time setup
 

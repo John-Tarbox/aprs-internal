@@ -10,6 +10,12 @@ import type { Env } from '../env';
 import type { OidcProviderConfig } from './oidc.service';
 
 export function googleConfig(env: Env): OidcProviderConfig {
+  // Caller must verify Google is configured (see `googleConfigured()` in
+  // src/routes/auth.routes.ts) before invoking this. We assert here so a
+  // direct mis-call surfaces loudly rather than producing a broken OAuth URL.
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    throw new Error('googleConfig called without GOOGLE_CLIENT_ID/SECRET set');
+  }
   return {
     providerId: 'google',
     authorizeEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',

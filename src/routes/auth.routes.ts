@@ -124,7 +124,14 @@ authRoutes.get('/okta/callback', async (c) => {
 
 // ── Google ──────────────────────────────────────────────────────────────
 
+function googleConfigured(env: AppEnv['Bindings']): boolean {
+  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+}
+
 authRoutes.get('/google/login', async (c) => {
+  if (!googleConfigured(c.env)) {
+    return c.redirect(`/login?error=${encodeURIComponent('Google sign-in is not configured yet. Use Okta.')}`, 302);
+  }
   const config = googleConfig(c.env);
   const next = safeNext(c.req.query('next'));
   const { authorizeUrl, setCookie } = await beginLogin(config, c.env.SESSION_SECRET, next);
@@ -133,6 +140,9 @@ authRoutes.get('/google/login', async (c) => {
 });
 
 authRoutes.get('/google/callback', async (c) => {
+  if (!googleConfigured(c.env)) {
+    return c.redirect(`/login?error=${encodeURIComponent('Google sign-in is not configured yet.')}`, 302);
+  }
   const config = googleConfig(c.env);
   try {
     const result = await runOidcCallback(c, config);

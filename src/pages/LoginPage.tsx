@@ -4,9 +4,10 @@ import { Layout } from './Layout';
 interface LoginPageProps {
   next?: string;
   error?: string;
+  googleEnabled?: boolean;
 }
 
-export const LoginPage: FC<LoginPageProps> = ({ next, error }) => {
+export const LoginPage: FC<LoginPageProps> = ({ next, error, googleEnabled }) => {
   const qs = next ? `?next=${encodeURIComponent(next)}` : '';
   return (
     <Layout title="Sign in">
@@ -18,11 +19,15 @@ export const LoginPage: FC<LoginPageProps> = ({ next, error }) => {
 
         <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 20px;">
           <a class="btn btn-primary" href={`/auth/okta/login${qs}`}>Sign in with Okta</a>
-          <a class="btn" href={`/auth/google/login${qs}`}>Sign in with Google</a>
+          {googleEnabled ? (
+            <a class="btn" href={`/auth/google/login${qs}`}>Sign in with Google</a>
+          ) : null}
         </div>
 
         <p class="muted" style="margin-top: 24px;">
-          Staff: use Okta. External collaborators: use the Google account the admin added to your invitation.
+          {googleEnabled
+            ? 'Staff: use Okta. External collaborators: use the Google account the admin added to your invitation.'
+            : 'Google sign-in for external collaborators is not yet configured. Staff: use Okta.'}
         </p>
       </div>
     </Layout>
