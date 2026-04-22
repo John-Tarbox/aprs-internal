@@ -1730,7 +1730,13 @@ const kanbanClientJs = `
   function renderAll() {
     for (var i = 0; i < boardEl.children.length; i++) {
       var colKey = boardEl.children[i].getAttribute('data-col');
+      // Skip non-column children — most importantly the staff-only
+      // "+ Add column" sentinel section, which has no data-col attr.
+      // Without these guards, the lookup below returns null and
+      // body.firstChild throws, silently halting the entire render.
+      if (!colKey) continue;
       var body = boardEl.querySelector('[data-col-body="' + colKey + '"]');
+      if (!body) continue;
       while (body.firstChild) body.removeChild(body.firstChild);
     }
     var byCol = {};
