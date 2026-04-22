@@ -14,9 +14,13 @@ import { LoginPage } from '../pages/LoginPage';
 import { HomePage } from '../pages/HomePage';
 import { MyCardsPage } from '../pages/MyCardsPage';
 import { CalendarPage } from '../pages/CalendarPage';
+import { DashboardPage } from '../pages/DashboardPage';
 import { AccessDeniedPage } from '../pages/AccessDeniedPage';
 import {
+  getCardCountsByAssignee,
+  getCardCountsByBoard,
   getColumnCounts,
+  getEventCountsByDay,
   listCardsAssignedToUser,
   listCardsWithDueDateInRange,
 } from '../services/kanban.service';
@@ -48,6 +52,25 @@ authedPageRoutes.get('/my', async (c) => {
   const user = c.get('user');
   const cards = await listCardsAssignedToUser(c.env.DB, user.id);
   return c.html(<MyCardsPage user={user} cards={cards} />);
+});
+
+authedPageRoutes.get('/dashboard', async (c) => {
+  const user = c.get('user');
+  const [columnCounts, byBoard, byAssignee, eventTrend] = await Promise.all([
+    getColumnCounts(c.env.DB),
+    getCardCountsByBoard(c.env.DB),
+    getCardCountsByAssignee(c.env.DB),
+    getEventCountsByDay(c.env.DB, 30),
+  ]);
+  return c.html(
+    <DashboardPage
+      user={user}
+      columnCounts={columnCounts}
+      byBoard={byBoard}
+      byAssignee={byAssignee}
+      eventTrend={eventTrend}
+    />
+  );
 });
 
 authedPageRoutes.get('/calendar', async (c) => {

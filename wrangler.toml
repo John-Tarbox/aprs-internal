@@ -18,6 +18,14 @@ binding = "DB"
 database_name = "aprs-internal-db"
 database_id = "45c19003-01a7-4f79-8aed-fd7cbf2b64d6"
 
+# R2 bucket for card attachments (S11). Files are stored under keys of
+# the form `cards/<cardId>/<random>-<filename>`. Worker proxies upload
+# and download — no presigned URLs, so authentication is enforced at
+# the route layer via the existing session.
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "aprs-internal-attachments"
+
 [[durable_objects.bindings]]
 name = "KANBAN_DO"
 class_name = "KanbanBoardDO"

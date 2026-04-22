@@ -485,6 +485,234 @@ export async function listCardsWithDueDateInRange(
   }));
 }
 
+// ── Attachments (S11 — metadata; bytes live in R2) ──────────────────────
+
+export interface AttachmentDto {
+  id: number;
+  cardId: number;
+  r2Key: string;
+  originalName: string;
+  contentType: string;
+  sizeBytes: number;
+  uploadedByUserId: number | null;
+  createdAt: string;
+}
+
+interface RawAttachmentRow {
+  id: number;
+  card_id: number;
+  r2_key: string;
+  original_name: string;
+  content_type: string;
+  size_bytes: number;
+  uploaded_by_user_id: number | null;
+  created_at: string;
+}
+
+function hydrateAttachment(row: RawAttachmentRow): AttachmentDto {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    r2Key: row.r2_key,
+    originalName: row.original_name,
+    contentType: row.content_type,
+    sizeBytes: row.size_bytes,
+    uploadedByUserId: row.uploaded_by_user_id,
+    createdAt: row.created_at,
+  };
+}
+
+export async function listAttachments(
+  db: D1Database,
+  cardId: number
+): Promise<AttachmentDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT * FROM kanban_card_attachments
+       WHERE card_id = ?
+       ORDER BY id ASC`
+    )
+    .bind(cardId)
+    .all<RawAttachmentRow>();
+  return (res.results ?? []).map(hydrateAttachment);
+}
+
+export async function getAttachment(
+  db: D1Database,
+  id: number
+): Promise<AttachmentDto | null> {
+  const row = await db
+    .prepare(`SELECT * FROM kanban_card_attachments WHERE id = ?`)
+    .bind(id)
+    .first<RawAttachmentRow>();
+  return row ? hydrateAttachment(row) : null;
+}
+
+export async function insertAttachment(
+  db: D1Database,
+  input: {
+    cardId: number;
+    r2Key: string;
+    originalName: string;
+    contentType: string;
+    sizeBytes: number;
+    uploadedByUserId: number | null;
+  }
+): Promise<AttachmentDto> {
+  const row = await db
+    .prepare(
+      `INSERT INTO kanban_card_attachments
+         (card_id, r2_key, original_name, content_type, size_bytes, uploaded_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING *`
+    )
+    .bind(
+      input.cardId,
+      input.r2Key,
+      input.originalName,
+      input.contentType,
+      input.sizeBytes,
+      input.uploadedByUserId
+    )
+    .first<RawAttachmentRow>();
+  if (!row) throw new Error('Failed to insert attachment');
+  return hydrateAttachment(row);
+}
+
+/**
+ * Delete an attachment row. Returns the row metadata (so the caller can
+ * purge R2 with the right key) or null if no row matched. Authorization
+ * is enforced upstream — this is just the SQL. Owner-only delete is the
+ * caller's choice.
+ */
+export async function deleteAttachmentRow(
+  db: D1Database,
+  id: number,
+  userId: number | null,
+  isAdmin: boolean
+): Promise<AttachmentDto | null> {
+  if (userId === null && !isAdmin) return null;
+  const row = isAdmin
+    ? await db
+        .prepare(
+          `DELETE FROM kanban_card_attachments WHERE id = ? RETURNING *`
+        )
+        .bind(id)
+        .first<RawAttachmentRow>()
+    : await db
+        .prepare(
+          `DELETE FROM kanban_card_attachments
+           WHERE id = ? AND uploaded_by_user_id = ?
+           RETURNING *`
+        )
+        .bind(id, userId)
+        .first<RawAttachmentRow>();
+  return row ? hydrateAttachment(row) : null;
+}
+
+// ── Dashboard aggregates (S16) ──────────────────────────────────────────
+
+export interface BoardCardCount {
+  boardId: number;
+  boardName: string;
+  boardSlug: string;
+  count: number;
+}
+
+/** Active (non-archived) card counts per board, sorted by count desc. */
+export async function getCardCountsByBoard(
+  db: D1Database
+): Promise<BoardCardCount[]> {
+  const res = await db
+    .prepare(
+      `SELECT b.id, b.name, b.slug, COUNT(c.id) as cnt
+       FROM kanban_boards b
+       LEFT JOIN kanban_cards c ON c.board_id = b.id AND c.archived_at IS NULL
+       GROUP BY b.id
+       ORDER BY cnt DESC, b.name ASC`
+    )
+    .all<{ id: number; name: string; slug: string; cnt: number }>();
+  return (res.results ?? []).map((r) => ({
+    boardId: r.id,
+    boardName: r.name,
+    boardSlug: r.slug,
+    count: r.cnt,
+  }));
+}
+
+export interface AssigneeCardCount {
+  userId: number;
+  displayName: string | null;
+  email: string;
+  count: number;
+}
+
+/** Top assignees by active card count. Limited to N to keep the chart legible. */
+export async function getCardCountsByAssignee(
+  db: D1Database,
+  limit = 10
+): Promise<AssigneeCardCount[]> {
+  const res = await db
+    .prepare(
+      `SELECT u.id, u.display_name, u.email, COUNT(*) as cnt
+       FROM kanban_card_assignees a
+       JOIN kanban_cards c ON c.id = a.card_id
+       JOIN users u ON u.id = a.user_id
+       WHERE c.archived_at IS NULL
+       GROUP BY u.id
+       ORDER BY cnt DESC, u.email ASC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<{ id: number; display_name: string | null; email: string; cnt: number }>();
+  return (res.results ?? []).map((r) => ({
+    userId: r.id,
+    displayName: r.display_name,
+    email: r.email,
+    count: r.cnt,
+  }));
+}
+
+export interface DailyEventCount {
+  /** YYYY-MM-DD (UTC). */
+  day: string;
+  count: number;
+}
+
+/**
+ * Daily event counts from the per-card activity log over the last `days`
+ * days (zero-filled for any day with no events). Sorted ascending so the
+ * first element is the oldest day in the window.
+ */
+export async function getEventCountsByDay(
+  db: D1Database,
+  days = 30
+): Promise<DailyEventCount[]> {
+  const today = new Date();
+  // Build the zero-filled day map first so missing days show as 0 in the chart.
+  const buckets = new Map<string, number>();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+    buckets.set(d.toISOString().slice(0, 10), 0);
+  }
+  // SQLite's substr() pulls YYYY-MM-DD off the front of created_at without a
+  // strftime call (which D1 supports but is overkill for a date prefix).
+  const res = await db
+    .prepare(
+      `SELECT substr(created_at, 1, 10) as day, COUNT(*) as cnt
+       FROM kanban_card_events
+       WHERE created_at >= datetime('now', '-' || ? || ' days')
+       GROUP BY day
+       ORDER BY day ASC`
+    )
+    .bind(days)
+    .all<{ day: string; cnt: number }>();
+  for (const r of res.results ?? []) {
+    if (buckets.has(r.day)) buckets.set(r.day, r.cnt);
+  }
+  return Array.from(buckets.entries()).map(([day, count]) => ({ day, count }));
+}
+
 // ── My Cards (cross-board) ──────────────────────────────────────────────
 
 export interface AssignedCardSummary {

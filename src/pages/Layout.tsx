@@ -25,6 +25,7 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
               <a href="/my">My Cards</a>
               <a href="/kanban">Boards</a>
               <a href="/calendar">Calendar</a>
+              <a href="/dashboard">Dashboard</a>
               <span class="who">
                 {user.displayName || user.email} · {user.roles.join(', ') || 'no role'}
               </span>

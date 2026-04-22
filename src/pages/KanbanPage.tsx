@@ -135,6 +135,15 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
               <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
             </label>
+            <section id="kf-attachments" class="kf-attachments" hidden aria-label="Attachments">
+              <h3 class="kf-attachments-title">Attachments</h3>
+              <ul id="kf-attachments-list" class="kf-attachments-list"></ul>
+              <div class="kf-attachments-add">
+                <input type="file" id="kf-attachment-input" aria-label="Choose file to upload" />
+                <button type="button" id="kf-attachment-upload" class="btn">Upload</button>
+                <span id="kf-attachment-status" class="kf-attachment-status muted"></span>
+              </div>
+            </section>
             <section id="kf-checklist" class="kf-checklist" hidden aria-label="Checklist">
               <h3 class="kf-checklist-title">Checklist <span id="kf-checklist-progress" class="kf-checklist-progress"></span></h3>
               <ol id="kf-checklist-list" class="kf-checklist-list"></ol>
@@ -325,6 +334,28 @@ const kanbanCss = `
   .kf-notes-hint {
     display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
   }
+
+  /* Attachments in the card modal. */
+  .kf-attachments { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-attachments[hidden] { display: none; }
+  .kf-attachments-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-attachments-list { list-style: none; margin: 0 0 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .kf-attachment-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border: 1px solid rgba(128,128,128,0.2); border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .kf-attachment-link { color: inherit; text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kf-attachment-link:hover { text-decoration: underline; }
+  .kf-attachment-meta { opacity: 0.6; font-size: 0.85em; flex-shrink: 0; }
+  .kf-attachment-delete {
+    background: none; border: none; color: inherit; cursor: pointer;
+    font-size: 1em; opacity: 0.5; padding: 0 4px;
+  }
+  .kf-attachment-delete:hover { opacity: 1; color: #b91c1c; }
+  .kf-attachments-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .kf-attachments-add input[type=file] { font-size: 0.85em; }
+  .kf-attachment-status { margin-left: auto; font-size: 0.85em; }
 
   /* Checklist in the card modal. */
   .kf-checklist { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
@@ -580,6 +611,11 @@ const kanbanClientJs = `
   var commentsEmptyEl = document.getElementById('kf-comments-empty');
   var commentInputEl = document.getElementById('kf-comment-input');
   var commentPostBtn = document.getElementById('kf-comment-post');
+  var attachmentsSectionEl = document.getElementById('kf-attachments');
+  var attachmentsListEl = document.getElementById('kf-attachments-list');
+  var attachmentInputEl = document.getElementById('kf-attachment-input');
+  var attachmentUploadBtn = document.getElementById('kf-attachment-upload');
+  var attachmentStatusEl = document.getElementById('kf-attachment-status');
   var checklistSectionEl = document.getElementById('kf-checklist');
   var checklistListEl = document.getElementById('kf-checklist-list');
   var checklistInputEl = document.getElementById('kf-checklist-input');
@@ -1230,6 +1266,119 @@ const kanbanClientJs = `
     return c;
   }
 
+  // ── Attachments ─────────────────────────────────────────────────────
+  // Attachments live outside the WebSocket flow — they go through HTTP
+  // routes (POST upload, GET stream, POST delete). We refetch the list on
+  // every modal open and after each mutation rather than bolting onto the
+  // realtime broadcast layer; uploads are infrequent enough that the UX
+  // cost (no live cross-user sync of attachments) is negligible.
+  var attachmentsByCardId = 0;
+  var attachmentList = [];
+
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderAttachments() {
+    while (attachmentsListEl.firstChild) attachmentsListEl.removeChild(attachmentsListEl.firstChild);
+    if (attachmentList.length === 0) {
+      var empty = document.createElement('li');
+      empty.className = 'muted';
+      empty.style.fontStyle = 'italic';
+      empty.style.fontSize = '0.85em';
+      empty.textContent = 'No attachments yet.';
+      attachmentsListEl.appendChild(empty);
+      return;
+    }
+    attachmentList.forEach(function(a) {
+      var li = document.createElement('li');
+      li.className = 'kf-attachment-item';
+      var link = document.createElement('a');
+      link.className = 'kf-attachment-link';
+      link.href = '/kanban/attachment/' + a.id;
+      link.textContent = a.originalName;
+      link.title = a.originalName;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      var meta = document.createElement('span');
+      meta.className = 'kf-attachment-meta';
+      meta.textContent = formatBytes(a.sizeBytes);
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'kf-attachment-delete';
+      del.textContent = '×';
+      del.setAttribute('aria-label', 'Delete attachment ' + a.originalName);
+      del.addEventListener('click', function() {
+        if (!confirm('Delete this attachment? This cannot be undone.')) return;
+        fetch('/kanban/attachment/' + a.id + '/delete', {
+          method: 'POST',
+          credentials: 'same-origin',
+        })
+          .then(function(r) { return r.ok ? r.json() : Promise.reject(r); })
+          .then(function() {
+            attachmentList = attachmentList.filter(function(x) { return x.id !== a.id; });
+            renderAttachments();
+          })
+          .catch(function() { showToast('Could not delete attachment.', 4000); });
+      });
+      li.appendChild(link);
+      li.appendChild(meta);
+      li.appendChild(del);
+      attachmentsListEl.appendChild(li);
+    });
+  }
+
+  function refreshAttachments(cardId) {
+    attachmentsByCardId = cardId;
+    attachmentList = [];
+    renderAttachments();
+    fetch('/kanban/c/' + cardId + '/attachments', { credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : { items: [] }; })
+      .then(function(j) {
+        if (attachmentsByCardId !== cardId) return; // stale
+        attachmentList = (j.items || []).slice();
+        renderAttachments();
+      })
+      .catch(function() { /* leave empty */ });
+  }
+
+  attachmentUploadBtn.addEventListener('click', function() {
+    if (!attachmentsByCardId) return;
+    var f = attachmentInputEl.files && attachmentInputEl.files[0];
+    if (!f) { showToast('Pick a file first.', 3000); return; }
+    var fd = new FormData();
+    fd.append('file', f);
+    attachmentUploadBtn.disabled = true;
+    attachmentStatusEl.textContent = 'Uploading…';
+    fetch('/kanban/c/' + attachmentsByCardId + '/attachments', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: fd,
+    })
+      .then(function(r) {
+        if (r.status === 413) throw new Error('too-large');
+        return r.ok ? r.json() : Promise.reject(r);
+      })
+      .then(function(j) {
+        if (j.attachment) attachmentList.push(j.attachment);
+        renderAttachments();
+        attachmentInputEl.value = '';
+        attachmentStatusEl.textContent = 'Uploaded.';
+        setTimeout(function() { attachmentStatusEl.textContent = ''; }, 2500);
+      })
+      .catch(function(err) {
+        attachmentStatusEl.textContent = '';
+        if (err && err.message === 'too-large') {
+          showToast('File too large (max 25 MB).', 5000);
+        } else {
+          showToast('Upload failed.', 4000);
+        }
+      })
+      .then(function() { attachmentUploadBtn.disabled = false; });
+  });
+
   // ── Checklist ───────────────────────────────────────────────────────
   // Items for the currently-opened card. Reset on each modal open.
   var checklistByCardId = 0;
@@ -1627,6 +1776,11 @@ const kanbanClientJs = `
     checklistItems = [];
     checklistByCardId = 0;
     checklistInputEl.value = '';
+    attachmentsSectionEl.hidden = true;
+    attachmentList = [];
+    attachmentsByCardId = 0;
+    attachmentInputEl.value = '';
+    attachmentStatusEl.textContent = '';
     saveBtn.disabled = false;
     formEl.dataset.column = column;
     modalEl.hidden = false;
@@ -1656,8 +1810,11 @@ const kanbanClientJs = `
     // active cards; Restore only appears for archived ones.
     archiveBtn.hidden = editingArchived;
     restoreBtn.hidden = !editingArchived;
-    // Reveal checklist + comments + activity timeline and kick off
-    // fetches for this card. All three render empty while in flight.
+    // Reveal attachments + checklist + comments + activity timeline and
+    // kick off fetches for this card. All four render empty while in
+    // flight.
+    attachmentsSectionEl.hidden = false;
+    refreshAttachments(id);
     checklistSectionEl.hidden = false;
     checklistInputEl.value = '';
     requestChecklistItems(id);

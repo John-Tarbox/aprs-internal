@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database;
   KANBAN_DO: DurableObjectNamespace;
+  /** R2 bucket for card attachments (S11). */
+  ATTACHMENTS: R2Bucket;
 
   ENVIRONMENT: 'production' | 'development';
   OKTA_DOMAIN: string;

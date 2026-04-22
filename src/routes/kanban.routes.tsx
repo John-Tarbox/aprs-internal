@@ -28,11 +28,20 @@ import {
   createBoard,
   renameBoard,
   deleteBoard,
+  deleteAttachmentRow,
+  getAttachment,
   getColumnCounts,
+  insertAttachment,
   listActiveUserDirectory,
+  listAttachments,
   listDistinctGroupNames,
 } from '../services/kanban.service';
 import { markNotificationsRead } from '../services/notifications.service';
+
+/** Hard cap for a single attachment upload. R2 itself can take much
+ *  larger objects but we proxy through the Worker which has request-body
+ *  limits, and the modal UX isn't built for huge files. */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MiB
 import { KANBAN_COLUMNS } from '../services/kanban.service';
 
 export const kanbanRoutes = new Hono<AppEnv>();
@@ -91,6 +100,112 @@ kanbanRoutes.post('/', requireRole('staff'), async (c) => {
       : `Could not create board: ${msg}`;
     return c.redirect(`/kanban?err=${encodeURIComponent(friendly)}`, 302);
   }
+});
+
+// ── Attachments (S11) ───────────────────────────────────────────────────
+
+/** Sanitize a user-supplied filename for inclusion in an R2 object key.
+ *  Keep alphanumerics, dots, dashes, underscores; replace the rest with _. */
+function safeFilename(name: string): string {
+  const trimmed = name.trim().slice(0, 200);
+  return trimmed.replace(/[^a-zA-Z0-9._-]+/g, '_') || 'file';
+}
+
+/** Cryptographically-random hex id for attachment keys. Avoids guessable URLs
+ *  and avoids collisions when the same file is uploaded to two cards. */
+function randomKey(): string {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+kanbanRoutes.get('/c/:cardId/attachments', async (c) => {
+  const cardId = Number.parseInt(c.req.param('cardId'), 10);
+  if (!Number.isFinite(cardId) || cardId <= 0) return c.json({ error: 'invalid' }, 400);
+  const items = await listAttachments(c.env.DB, cardId);
+  return c.json({ items });
+});
+
+kanbanRoutes.post('/c/:cardId/attachments', async (c) => {
+  const user = c.get('user');
+  const cardId = Number.parseInt(c.req.param('cardId'), 10);
+  if (!Number.isFinite(cardId) || cardId <= 0) return c.json({ error: 'invalid card id' }, 400);
+
+  // Verify the card exists before we burn an R2 round-trip on a bad target.
+  const cardRow = await c.env.DB
+    .prepare(`SELECT id FROM kanban_cards WHERE id = ?`)
+    .bind(cardId)
+    .first<{ id: number }>();
+  if (!cardRow) return c.json({ error: 'card not found' }, 404);
+
+  const form = await c.req.formData();
+  const raw = form.get('file');
+  // Worker types don't include the File constructor; duck-type via the
+  // shape we actually need (Blob plus a name).
+  const file = raw as unknown as Blob & { name?: string } | null;
+  if (!file || typeof file !== 'object' || typeof (file as Blob).size !== 'number') {
+    return c.json({ error: 'missing file' }, 400);
+  }
+  if (file.size <= 0) return c.json({ error: 'empty file' }, 400);
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    return c.json({ error: `file exceeds ${MAX_ATTACHMENT_BYTES} bytes` }, 413);
+  }
+
+  const originalName = (file.name && typeof file.name === 'string') ? file.name : 'upload';
+  const key = `cards/${cardId}/${randomKey()}-${safeFilename(originalName)}`;
+  const contentType = file.type || 'application/octet-stream';
+  await c.env.ATTACHMENTS.put(key, file.stream(), {
+    httpMetadata: { contentType },
+  });
+
+  const row = await insertAttachment(c.env.DB, {
+    cardId,
+    r2Key: key,
+    originalName,
+    contentType,
+    sizeBytes: file.size,
+    uploadedByUserId: user.id,
+  });
+  return c.json({ attachment: row });
+});
+
+kanbanRoutes.get('/attachment/:id', async (c) => {
+  const id = Number.parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(id) || id <= 0) return c.text('Invalid id', 400);
+  const row = await getAttachment(c.env.DB, id);
+  if (!row) return c.text('Not found', 404);
+  const obj = await c.env.ATTACHMENTS.get(row.r2Key);
+  if (!obj) {
+    // Row is orphaned (R2 object missing). Surface as 404; no point repairing
+    // here — the user will report it and we can clean up via DB.
+    return c.text('Attachment file missing', 404);
+  }
+  // Inline display for browser-renderable types; force download otherwise.
+  const inlineable = /^(image\/|application\/pdf|text\/plain)/.test(row.contentType);
+  const disposition = `${inlineable ? 'inline' : 'attachment'}; filename="${row.originalName.replace(/"/g, '')}"`;
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': row.contentType,
+      'Content-Length': String(row.sizeBytes),
+      'Content-Disposition': disposition,
+      // Inline previews can be cached briefly; auth-gated content shouldn't
+      // be stored by intermediaries.
+      'Cache-Control': 'private, max-age=300',
+    },
+  });
+});
+
+kanbanRoutes.post('/attachment/:id/delete', async (c) => {
+  const user = c.get('user');
+  const id = Number.parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(id) || id <= 0) return c.json({ error: 'invalid' }, 400);
+  const isAdmin = user.roles.includes('admin');
+  const row = await deleteAttachmentRow(c.env.DB, id, user.id, isAdmin);
+  if (!row) return c.json({ error: 'forbidden or not found' }, 403);
+  // Best-effort R2 purge — if it fails, the row is already gone and we'll
+  // have a stranded object. Cheaper than a 2-phase delete for v1.
+  await c.env.ATTACHMENTS.delete(row.r2Key).catch(() => {});
+  return c.json({ ok: true, id: row.id, cardId: row.cardId });
 });
 
 // ── Card deep-link redirector ───────────────────────────────────────────
