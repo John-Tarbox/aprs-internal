@@ -8,8 +8,11 @@
 
 export type AuditAction =
   | 'login.okta'
+  | 'login.okta.denied'
+  | 'login.okta.failed'
   | 'login.google'
   | 'login.google.denied'
+  | 'login.google.failed'
   | 'logout'
   | 'user.invited'
   | 'user.deactivated'

@@ -81,7 +81,7 @@ authRoutes.get('/okta/callback', async (c) => {
     let user = await findUserByEmail(c.env.DB, email);
     if (user && user.authType !== 'okta') {
       await writeAudit(c.env.DB, {
-        action: 'login.google.denied',
+        action: 'login.okta.denied',
         metadata: { email, reason: 'email exists as google-only user; Okta sign-in rejected' },
         ip: getClientIp(c),
       });
@@ -98,7 +98,7 @@ authRoutes.get('/okta/callback', async (c) => {
     if (!user.active) {
       await writeAudit(c.env.DB, {
         userId: user.id,
-        action: 'login.google.denied',
+        action: 'login.okta.denied',
         metadata: { email, reason: 'account deactivated' },
         ip: getClientIp(c),
       });
@@ -120,6 +120,18 @@ authRoutes.get('/okta/callback', async (c) => {
     return c.redirect(result.redirectAfterLogin ?? '/', 302);
   } catch (err) {
     console.error('okta callback error:', err);
+    try {
+      await writeAudit(c.env.DB, {
+        action: 'login.okta.failed',
+        metadata: {
+          error: String((err as Error)?.message ?? err),
+          stack: (err as Error)?.stack,
+        },
+        ip: getClientIp(c),
+      });
+    } catch (auditErr) {
+      console.error('failed to write okta failure audit row:', auditErr);
+    }
     return c.redirect(`/login?error=${encodeURIComponent('Okta sign-in failed. Please try again.')}`, 302);
   }
 });
@@ -187,6 +199,18 @@ authRoutes.get('/google/callback', async (c) => {
     return c.redirect(result.redirectAfterLogin ?? '/', 302);
   } catch (err) {
     console.error('google callback error:', err);
+    try {
+      await writeAudit(c.env.DB, {
+        action: 'login.google.failed',
+        metadata: {
+          error: String((err as Error)?.message ?? err),
+          stack: (err as Error)?.stack,
+        },
+        ip: getClientIp(c),
+      });
+    } catch (auditErr) {
+      console.error('failed to write google failure audit row:', auditErr);
+    }
     return c.redirect(`/login?error=${encodeURIComponent('Google sign-in failed. Please try again.')}`, 302);
   }
 });
