@@ -111,7 +111,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
                   style={`background: ${col.color ?? '#999999'}`}
                   aria-label={`Color for column ${col.label}`}
                   title="Set column color"
-                />
+                ></button>
               ) : null}
               {isStaff ? (
                 <button class="kanban-col-del" data-col-del={col.columnName} type="button" aria-label={`Delete column ${col.label}`} title="Delete column (must be empty)">×</button>
@@ -2135,20 +2135,24 @@ const kanbanClientJs = `
     });
   });
 
-  // Column color picker (staff) — opens the shared web-safe picker.
-  // Click delegated on boardEl so newly-built columns work without
-  // re-binding. Picker callback fires set_column_color with the chosen
-  // hex (or null to clear).
+  // Column color picker (staff/admin) — opens the shared web-safe
+  // picker. Click delegated on boardEl so newly-built columns work
+  // without re-binding. Uses closest() rather than matches() so a
+  // click landing on a descendant (or a CSS pseudo) of the swatch
+  // still triggers correctly. Picker callback fires set_column_color
+  // with the chosen hex (or null to clear).
   boardEl.addEventListener('click', function(e) {
     var t = e.target;
-    if (!t || !t.matches || !t.matches('.kanban-col-color')) return;
+    if (!t || !t.closest) return;
+    var swatch = t.closest('.kanban-col-color');
+    if (!swatch) return;
     if (!currentUser.isStaff) return;
     e.preventDefault();
-    var col = t.getAttribute('data-col-color-input');
+    var col = swatch.getAttribute('data-col-color-input');
     var cfg = columnConfig.get(col);
     var current = (cfg && cfg.color) || '';
     openWebSafeColorPicker({
-      anchor: t,
+      anchor: swatch,
       current: current,
       allowClear: true,
       onChange: function(newColor) {
