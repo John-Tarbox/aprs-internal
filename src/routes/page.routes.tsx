@@ -15,13 +15,19 @@ import { HomePage } from '../pages/HomePage';
 import { MyCardsPage } from '../pages/MyCardsPage';
 import { CalendarPage } from '../pages/CalendarPage';
 import { DashboardPage } from '../pages/DashboardPage';
+import { TablePage } from '../pages/TablePage';
+import { TimelinePage } from '../pages/TimelinePage';
 import { AccessDeniedPage } from '../pages/AccessDeniedPage';
 import {
   getCardCountsByAssignee,
   getCardCountsByBoard,
   getColumnCounts,
   getEventCountsByDay,
+  listActiveUserDirectory,
+  listAllActiveCardsForTable,
+  listBoards,
   listCardsAssignedToUser,
+  listCardsForTimeline,
   listCardsWithDueDateInRange,
 } from '../services/kanban.service';
 
@@ -71,6 +77,57 @@ authedPageRoutes.get('/dashboard', async (c) => {
       eventTrend={eventTrend}
     />
   );
+});
+
+authedPageRoutes.get('/table', async (c) => {
+  const user = c.get('user');
+  const boardIdRaw = c.req.query('board');
+  const assigneeRaw = c.req.query('assignee');
+  const columnRaw = c.req.query('column');
+  const boardId = boardIdRaw ? Number.parseInt(boardIdRaw, 10) : NaN;
+  const assigneeUserId = assigneeRaw ? Number.parseInt(assigneeRaw, 10) : NaN;
+  const opts = {
+    boardId: Number.isFinite(boardId) && boardId > 0 ? boardId : undefined,
+    assigneeUserId: Number.isFinite(assigneeUserId) && assigneeUserId > 0 ? assigneeUserId : undefined,
+    column: columnRaw && columnRaw.trim() ? columnRaw.trim() : undefined,
+  };
+  const [rows, boards, knownUsers] = await Promise.all([
+    listAllActiveCardsForTable(c.env.DB, opts),
+    listBoards(c.env.DB),
+    listActiveUserDirectory(c.env.DB),
+  ]);
+  return c.html(
+    <TablePage
+      user={user}
+      rows={rows}
+      boards={boards}
+      filters={{
+        boardId: opts.boardId ?? null,
+        column: opts.column ?? null,
+        assigneeUserId: opts.assigneeUserId ?? null,
+      }}
+      knownUsers={knownUsers}
+    />
+  );
+});
+
+authedPageRoutes.get('/timeline', async (c) => {
+  const user = c.get('user');
+  const now = new Date();
+  const yearRaw = Number.parseInt(c.req.query('year') ?? '', 10);
+  const monthRaw = Number.parseInt(c.req.query('month') ?? '', 10);
+  const year = Number.isFinite(yearRaw) && yearRaw >= 1970 && yearRaw <= 9999
+    ? yearRaw
+    : now.getUTCFullYear();
+  const month = Number.isFinite(monthRaw) && monthRaw >= 1 && monthRaw <= 12
+    ? monthRaw
+    : now.getUTCMonth() + 1;
+  const fromDate = new Date(Date.UTC(year, month - 1, 1));
+  const toDate = new Date(Date.UTC(year, month, 0));
+  const fromIso = fromDate.toISOString().slice(0, 10);
+  const toIso = toDate.toISOString().slice(0, 10);
+  const cards = await listCardsForTimeline(c.env.DB, fromIso, toIso);
+  return c.html(<TimelinePage user={user} year={year} month={month} cards={cards} />);
 });
 
 authedPageRoutes.get('/calendar', async (c) => {

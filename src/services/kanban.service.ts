@@ -482,6 +482,186 @@ export async function setColumnWipLimit(
   };
 }
 
+// ── Table view (S15) — flat queryable list of active cards ──────────────
+
+export interface TableCardRow {
+  id: number;
+  boardId: number;
+  boardSlug: string;
+  boardName: string;
+  column: ColumnName;
+  columnLabel: string;
+  position: number;
+  title: string;
+  assignees: AssigneeDto[];
+  groups: string[];
+  assigned: string | null;
+  startDate: string | null;
+  dueDate: string | null;
+  dueTime: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TableQueryOpts {
+  boardId?: number;
+  assigneeUserId?: number;
+  column?: string;
+}
+
+/**
+ * Active (non-archived) cards across every board, with denormalized
+ * board name / column label for table display. Filters applied via
+ * optional `opts`. Returns full assignee + group lists per row using
+ * the same bulk-fetch pattern as listCards. Sorted by board then column
+ * position then card position.
+ */
+export async function listAllActiveCardsForTable(
+  db: D1Database,
+  opts: TableQueryOpts = {}
+): Promise<TableCardRow[]> {
+  const where: string[] = ['c.archived_at IS NULL'];
+  const binds: Array<string | number> = [];
+  if (opts.boardId !== undefined) {
+    where.push('c.board_id = ?');
+    binds.push(opts.boardId);
+  }
+  if (opts.column) {
+    where.push('c.column_name = ?');
+    binds.push(opts.column);
+  }
+  if (opts.assigneeUserId !== undefined) {
+    where.push('EXISTS (SELECT 1 FROM kanban_card_assignees a WHERE a.card_id = c.id AND a.user_id = ?)');
+    binds.push(opts.assigneeUserId);
+  }
+  const sql =
+    `SELECT c.id, c.board_id, c.column_name, c.position, c.title,
+            c.assigned, c.start_date, c.due_date, c.due_time,
+            c.created_at, c.updated_at,
+            b.slug as board_slug, b.name as board_name,
+            bc.label as column_label
+     FROM kanban_cards c
+     JOIN kanban_boards b ON b.id = c.board_id
+     LEFT JOIN kanban_board_columns bc
+       ON bc.board_id = c.board_id AND bc.column_name = c.column_name
+     WHERE ${where.join(' AND ')}
+     ORDER BY b.name ASC, COALESCE(bc.position, 99) ASC, c.position ASC, c.id ASC`;
+  const res = await db
+    .prepare(sql)
+    .bind(...binds)
+    .all<{
+      id: number;
+      board_id: number;
+      column_name: ColumnName;
+      position: number;
+      title: string;
+      assigned: string | null;
+      start_date: string | null;
+      due_date: string | null;
+      due_time: string | null;
+      created_at: string;
+      updated_at: string;
+      board_slug: string;
+      board_name: string;
+      column_label: string | null;
+    }>();
+  const rows = res.results ?? [];
+  const ids = rows.map((r) => r.id);
+  const [groups, assignees] = await Promise.all([
+    loadGroupsForCards(db, ids),
+    loadAssigneesForCards(db, ids),
+  ]);
+  return rows.map((r) => ({
+    id: r.id,
+    boardId: r.board_id,
+    boardSlug: r.board_slug,
+    boardName: r.board_name,
+    column: r.column_name,
+    columnLabel: r.column_label ?? legacyColumnLabel(r.column_name),
+    position: r.position,
+    title: r.title,
+    assignees: assignees.get(r.id) ?? [],
+    groups: groups.get(r.id) ?? [],
+    assigned: r.assigned,
+    startDate: r.start_date,
+    dueDate: r.due_date,
+    dueTime: r.due_time,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+// ── Timeline view (S17) — cards with date ranges ────────────────────────
+
+export interface TimelineCardRow {
+  id: number;
+  boardId: number;
+  boardSlug: string;
+  boardName: string;
+  column: ColumnName;
+  columnLabel: string;
+  title: string;
+  /** ISO YYYY-MM-DD; either startDate or dueDate is guaranteed present. */
+  startDate: string | null;
+  dueDate: string | null;
+}
+
+/**
+ * Active cards that have at least one date (start_date or due_date)
+ * intersecting [fromIso, toIso]. Returns rows ready for SVG bar layout.
+ * The intersection check ensures the timeline doesn't show a year-long
+ * card as a single point at the window's edge.
+ */
+export async function listCardsForTimeline(
+  db: D1Database,
+  fromIso: string,
+  toIso: string
+): Promise<TimelineCardRow[]> {
+  // A card intersects [from, to] iff:
+  //   max(start, due, due) <= to AND min(start, due, due) >= from
+  // We coalesce start_date with due_date and vice versa so single-date
+  // cards still produce a 1-day bar.
+  const res = await db
+    .prepare(
+      `SELECT c.id, c.board_id, c.column_name, c.title,
+              c.start_date, c.due_date,
+              b.slug as board_slug, b.name as board_name,
+              bc.label as column_label
+       FROM kanban_cards c
+       JOIN kanban_boards b ON b.id = c.board_id
+       LEFT JOIN kanban_board_columns bc
+         ON bc.board_id = c.board_id AND bc.column_name = c.column_name
+       WHERE c.archived_at IS NULL
+         AND (c.start_date IS NOT NULL OR c.due_date IS NOT NULL)
+         AND COALESCE(c.start_date, c.due_date) <= ?
+         AND COALESCE(c.due_date, c.start_date) >= ?
+       ORDER BY COALESCE(c.start_date, c.due_date) ASC, c.id ASC`
+    )
+    .bind(toIso, fromIso)
+    .all<{
+      id: number;
+      board_id: number;
+      column_name: ColumnName;
+      title: string;
+      start_date: string | null;
+      due_date: string | null;
+      board_slug: string;
+      board_name: string;
+      column_label: string | null;
+    }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    boardId: r.board_id,
+    boardSlug: r.board_slug,
+    boardName: r.board_name,
+    column: r.column_name,
+    columnLabel: r.column_label ?? legacyColumnLabel(r.column_name),
+    title: r.title,
+    startDate: r.start_date,
+    dueDate: r.due_date,
+  }));
+}
+
 // ── Calendar view (cross-board, by due date) ────────────────────────────
 
 export interface CalendarCardSummary {
