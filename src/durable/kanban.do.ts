@@ -22,8 +22,10 @@ import {
   KANBAN_COLUMNS,
   archiveCard,
   createCard,
+  createChecklistItem,
   createComment,
   deleteCard,
+  deleteChecklistItem,
   deleteComment,
   getComment,
   listActiveUserDirectory,
@@ -31,12 +33,14 @@ import {
   listBoardColumns,
   listCardEvents,
   listCards,
+  listChecklistItems,
   listComments,
   logCardEvent,
   moveCard,
   setColumnWipLimit,
   unarchiveCard,
   updateCard,
+  updateChecklistItem,
   updateComment,
   type CardDto,
   type CardEventDto,
@@ -53,6 +57,7 @@ const MAX_TITLE = 200;
 const MAX_FIELD = 100;
 const MAX_NOTES = 10_000;
 const MAX_COMMENT = 5_000;
+const MAX_CHECKLIST_ITEM = 500;
 
 const columnEnum = z.enum(KANBAN_COLUMNS);
 
@@ -189,6 +194,29 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     column: columnEnum,
     wipLimit: z.number().int().min(1).max(999).nullable(),
+  }),
+  z.object({
+    type: z.literal('list_checklist_items'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('create_checklist_item'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
+    body: z.string().min(1).max(MAX_CHECKLIST_ITEM),
+  }),
+  z.object({
+    type: z.literal('update_checklist_item'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+    body: z.string().min(1).max(MAX_CHECKLIST_ITEM).optional(),
+    completed: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal('delete_checklist_item'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
   }),
 ]);
 
@@ -585,6 +613,61 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'comment_updated', comment: updated });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'list_checklist_items': {
+          const items = await listChecklistItems(this.env.DB, parsed.cardId);
+          this.sendTo(ws, {
+            type: 'checklist_items_snapshot',
+            cardId: parsed.cardId,
+            items,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'create_checklist_item': {
+          const item = await createChecklistItem(
+            this.env.DB,
+            parsed.cardId,
+            parsed.body
+          );
+          this.broadcast({ type: 'checklist_item_created', item });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'update_checklist_item': {
+          const updated = await updateChecklistItem(this.env.DB, parsed.id, {
+            body: parsed.body,
+            completed: parsed.completed,
+          });
+          if (!updated) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'not_found',
+            });
+            return;
+          }
+          this.broadcast({ type: 'checklist_item_updated', item: updated });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'delete_checklist_item': {
+          const ref = await deleteChecklistItem(this.env.DB, parsed.id);
+          if (!ref) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'not_found',
+            });
+            return;
+          }
+          this.broadcast({
+            type: 'checklist_item_deleted',
+            id: ref.id,
+            cardId: ref.cardId,
+          });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

@@ -135,6 +135,15 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
               <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
             </label>
+            <section id="kf-checklist" class="kf-checklist" hidden aria-label="Checklist">
+              <h3 class="kf-checklist-title">Checklist <span id="kf-checklist-progress" class="kf-checklist-progress"></span></h3>
+              <ol id="kf-checklist-list" class="kf-checklist-list"></ol>
+              <div class="kf-checklist-add">
+                <input type="text" id="kf-checklist-input" maxlength={500}
+                       placeholder="Add an item, press Enter" aria-label="New checklist item" />
+                <button type="button" id="kf-checklist-add-btn" class="btn">Add</button>
+              </div>
+            </section>
             <section id="kf-comments" class="kf-comments" hidden aria-label="Comments">
               <h3 class="kf-comments-title">Comments</h3>
               <ol id="kf-comments-list" class="kf-comments-list"></ol>
@@ -316,6 +325,30 @@ const kanbanCss = `
   .kf-notes-hint {
     display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
   }
+
+  /* Checklist in the card modal. */
+  .kf-checklist { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-checklist[hidden] { display: none; }
+  .kf-checklist-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-checklist-progress { font-weight: 400; opacity: 0.7; font-size: 0.9em; margin-left: 4px; }
+  .kf-checklist-list { list-style: none; margin: 0 0 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .kf-checklist-item {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 4px 6px; border-radius: 4px; font-size: 0.9em;
+  }
+  .kf-checklist-item:hover { background: rgba(128,128,128,0.08); }
+  .kf-checklist-item input[type=checkbox] { margin-top: 4px; flex-shrink: 0; cursor: pointer; }
+  .kf-checklist-body { flex: 1; word-break: break-word; }
+  .kf-checklist-item.kf-checklist-done .kf-checklist-body { text-decoration: line-through; opacity: 0.6; }
+  .kf-checklist-delete {
+    background: none; border: none; color: inherit; cursor: pointer;
+    font-size: 1em; opacity: 0; padding: 0 4px;
+  }
+  .kf-checklist-item:hover .kf-checklist-delete,
+  .kf-checklist-item:focus-within .kf-checklist-delete { opacity: 0.7; }
+  .kf-checklist-delete:hover { opacity: 1; }
+  .kf-checklist-add { display: flex; gap: 6px; }
+  .kf-checklist-add input { flex: 1; }
 
   /* Comments thread in the card modal. */
   .kf-comments { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
@@ -547,6 +580,11 @@ const kanbanClientJs = `
   var commentsEmptyEl = document.getElementById('kf-comments-empty');
   var commentInputEl = document.getElementById('kf-comment-input');
   var commentPostBtn = document.getElementById('kf-comment-post');
+  var checklistSectionEl = document.getElementById('kf-checklist');
+  var checklistListEl = document.getElementById('kf-checklist-list');
+  var checklistInputEl = document.getElementById('kf-checklist-input');
+  var checklistAddBtn = document.getElementById('kf-checklist-add-btn');
+  var checklistProgressEl = document.getElementById('kf-checklist-progress');
 
   // Current user identity, parsed from a JSON island the server emits.
   // Used to gate inline edit/delete buttons. Falls back to a placeholder
@@ -1192,6 +1230,102 @@ const kanbanClientJs = `
     return c;
   }
 
+  // ── Checklist ───────────────────────────────────────────────────────
+  // Items for the currently-opened card. Reset on each modal open.
+  var checklistByCardId = 0;
+  var checklistItems = [];
+
+  function renderChecklist() {
+    while (checklistListEl.firstChild) checklistListEl.removeChild(checklistListEl.firstChild);
+    var done = 0;
+    for (var i = 0; i < checklistItems.length; i++) {
+      var item = checklistItems[i];
+      if (item.completedAt) done++;
+      checklistListEl.appendChild(renderChecklistItemNode(item));
+    }
+    checklistProgressEl.textContent = checklistItems.length === 0
+      ? ''
+      : '(' + done + ' / ' + checklistItems.length + ')';
+  }
+
+  function renderChecklistItemNode(item) {
+    var li = document.createElement('li');
+    li.className = 'kf-checklist-item' + (item.completedAt ? ' kf-checklist-done' : '');
+    li.setAttribute('data-checklist-id', String(item.id));
+
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !!item.completedAt;
+    box.setAttribute('aria-label', item.completedAt ? 'Mark item incomplete' : 'Mark item complete');
+    box.addEventListener('change', function() {
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'update_checklist_item', id: item.id });
+      send({
+        type: 'update_checklist_item',
+        clientMsgId: cmid,
+        id: item.id,
+        completed: box.checked,
+      });
+    });
+    li.appendChild(box);
+
+    var body = document.createElement('span');
+    body.className = 'kf-checklist-body';
+    body.textContent = item.body;
+    li.appendChild(body);
+
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'kf-checklist-delete';
+    del.textContent = '×';
+    del.setAttribute('aria-label', 'Delete checklist item');
+    del.addEventListener('click', function() {
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'delete_checklist_item', id: item.id });
+      send({ type: 'delete_checklist_item', clientMsgId: cmid, id: item.id });
+    });
+    li.appendChild(del);
+
+    return li;
+  }
+
+  function requestChecklistItems(cardId) {
+    checklistByCardId = cardId;
+    checklistItems = [];
+    renderChecklist();
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_checklist_items', cardId: cardId });
+    send({ type: 'list_checklist_items', clientMsgId: cmid, cardId: cardId });
+  }
+
+  function postChecklistItem() {
+    if (!checklistByCardId) return;
+    var body = checklistInputEl.value.trim();
+    if (!body) return;
+    checklistAddBtn.disabled = true;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'create_checklist_item', cardId: checklistByCardId });
+    var ok = send({
+      type: 'create_checklist_item',
+      clientMsgId: cmid,
+      cardId: checklistByCardId,
+      body: body,
+    });
+    if (ok) {
+      checklistInputEl.value = '';
+    }
+    checklistAddBtn.disabled = false;
+    checklistInputEl.focus();
+  }
+
+  checklistAddBtn.addEventListener('click', postChecklistItem);
+  checklistInputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      postChecklistItem();
+    }
+  });
+
   // ── Comments ────────────────────────────────────────────────────────
   // Comments for the currently-opened card, oldest first. Reset on each
   // modal open. Comment ids are unique across the board so we key by id.
@@ -1489,6 +1623,10 @@ const kanbanClientJs = `
     commentsByCardId = 0;
     commentInputEl.value = '';
     commentPostBtn.disabled = false;
+    checklistSectionEl.hidden = true;
+    checklistItems = [];
+    checklistByCardId = 0;
+    checklistInputEl.value = '';
     saveBtn.disabled = false;
     formEl.dataset.column = column;
     modalEl.hidden = false;
@@ -1518,8 +1656,11 @@ const kanbanClientJs = `
     // active cards; Restore only appears for archived ones.
     archiveBtn.hidden = editingArchived;
     restoreBtn.hidden = !editingArchived;
-    // Reveal comments + activity timeline and kick off fetches for this
-    // card. Both lists render empty while the requests are in flight.
+    // Reveal checklist + comments + activity timeline and kick off
+    // fetches for this card. All three render empty while in flight.
+    checklistSectionEl.hidden = false;
+    checklistInputEl.value = '';
+    requestChecklistItems(id);
     commentsSectionEl.hidden = false;
     commentInputEl.value = '';
     commentPostBtn.disabled = false;
@@ -1885,6 +2026,31 @@ const kanbanClientJs = `
         if (commentsByCardId !== msg.cardId) return;
         commentList = commentList.filter(function(c) { return c.id !== msg.id; });
         renderCommentsList();
+        return;
+      case 'checklist_items_snapshot':
+        if (checklistByCardId !== msg.cardId) return;
+        checklistItems = (msg.items || []).slice();
+        renderChecklist();
+        return;
+      case 'checklist_item_created':
+        if (!msg.item || checklistByCardId !== msg.item.cardId) return;
+        checklistItems.push(msg.item);
+        renderChecklist();
+        return;
+      case 'checklist_item_updated':
+        if (!msg.item || checklistByCardId !== msg.item.cardId) return;
+        for (var ki = 0; ki < checklistItems.length; ki++) {
+          if (checklistItems[ki].id === msg.item.id) {
+            checklistItems[ki] = msg.item;
+            break;
+          }
+        }
+        renderChecklist();
+        return;
+      case 'checklist_item_deleted':
+        if (checklistByCardId !== msg.cardId) return;
+        checklistItems = checklistItems.filter(function(i) { return i.id !== msg.id; });
+        renderChecklist();
         return;
       case 'column_config_updated':
         // Single column's config changed (e.g., WIP limit set/cleared).

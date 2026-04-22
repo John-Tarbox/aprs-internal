@@ -425,6 +425,129 @@ export async function setColumnWipLimit(
   };
 }
 
+// ── Calendar view (cross-board, by due date) ────────────────────────────
+
+export interface CalendarCardSummary {
+  id: number;
+  boardId: number;
+  boardSlug: string;
+  boardName: string;
+  column: ColumnName;
+  title: string;
+  startDate: string | null;
+  dueDate: string;        // never null in this projection — we filter on it
+  dueTime: string | null;
+}
+
+/**
+ * Active cards across every board with a due_date within [fromIso, toIso]
+ * inclusive (YYYY-MM-DD). Sorted by due_date then time. Used by /calendar.
+ */
+export async function listCardsWithDueDateInRange(
+  db: D1Database,
+  fromIso: string,
+  toIso: string
+): Promise<CalendarCardSummary[]> {
+  const res = await db
+    .prepare(
+      `SELECT c.id, c.board_id, c.column_name, c.title,
+              c.start_date, c.due_date, c.due_time,
+              b.slug as board_slug, b.name as board_name
+       FROM kanban_cards c
+       JOIN kanban_boards b ON b.id = c.board_id
+       WHERE c.archived_at IS NULL
+         AND c.due_date IS NOT NULL
+         AND c.due_date >= ? AND c.due_date <= ?
+       ORDER BY c.due_date ASC, c.due_time ASC, b.name ASC, c.id ASC`
+    )
+    .bind(fromIso, toIso)
+    .all<{
+      id: number;
+      board_id: number;
+      column_name: ColumnName;
+      title: string;
+      start_date: string | null;
+      due_date: string;
+      due_time: string | null;
+      board_slug: string;
+      board_name: string;
+    }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    boardId: r.board_id,
+    boardSlug: r.board_slug,
+    boardName: r.board_name,
+    column: r.column_name,
+    title: r.title,
+    startDate: r.start_date,
+    dueDate: r.due_date,
+    dueTime: r.due_time,
+  }));
+}
+
+// ── My Cards (cross-board) ──────────────────────────────────────────────
+
+export interface AssignedCardSummary {
+  id: number;
+  boardId: number;
+  boardSlug: string;
+  boardName: string;
+  column: ColumnName;
+  position: number;
+  title: string;
+  startDate: string | null;
+  dueDate: string | null;
+  dueTime: string | null;
+}
+
+/**
+ * Active (non-archived) cards across every board where `userId` is in
+ * the assignee set. Sorted by due date (nulls last), then by board, then
+ * by column position. Used by the /my page.
+ */
+export async function listCardsAssignedToUser(
+  db: D1Database,
+  userId: number
+): Promise<AssignedCardSummary[]> {
+  const res = await db
+    .prepare(
+      `SELECT c.id, c.board_id, c.column_name, c.position, c.title,
+              c.start_date, c.due_date, c.due_time,
+              b.slug as board_slug, b.name as board_name
+       FROM kanban_card_assignees a
+       JOIN kanban_cards c ON c.id = a.card_id
+       JOIN kanban_boards b ON b.id = c.board_id
+       WHERE a.user_id = ? AND c.archived_at IS NULL
+       ORDER BY (c.due_date IS NULL) ASC, c.due_date ASC,
+                b.name ASC, c.column_name ASC, c.position ASC`
+    )
+    .bind(userId)
+    .all<{
+      id: number;
+      board_id: number;
+      column_name: ColumnName;
+      position: number;
+      title: string;
+      start_date: string | null;
+      due_date: string | null;
+      due_time: string | null;
+      board_slug: string;
+      board_name: string;
+    }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    boardId: r.board_id,
+    boardSlug: r.board_slug,
+    boardName: r.board_name,
+    column: r.column_name,
+    position: r.position,
+    title: r.title,
+    startDate: r.start_date,
+    dueDate: r.due_date,
+    dueTime: r.due_time,
+  }));
+}
+
 export async function listActiveUserDirectory(
   db: D1Database
 ): Promise<AssigneeDto[]> {
@@ -1377,6 +1500,143 @@ export async function deleteComment(
         )
         .bind(id, userId)
         .first<{ id: number; card_id: number }>();
+  return row ? { id: row.id, cardId: row.card_id } : null;
+}
+
+// ── Checklist items (S10) ───────────────────────────────────────────────
+
+export interface ChecklistItemDto {
+  id: number;
+  cardId: number;
+  position: number;
+  body: string;
+  /** ISO timestamp when checked off; null = unchecked. */
+  completedAt: string | null;
+  dueDate: string | null;
+  assigneeUserId: number | null;
+  createdAt: string;
+}
+
+interface RawChecklistRow {
+  id: number;
+  card_id: number;
+  position: number;
+  body: string;
+  completed_at: string | null;
+  due_date: string | null;
+  assignee_user_id: number | null;
+  created_at: string;
+}
+
+function hydrateChecklistItem(row: RawChecklistRow): ChecklistItemDto {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    position: row.position,
+    body: row.body,
+    completedAt: row.completed_at,
+    dueDate: row.due_date,
+    assigneeUserId: row.assignee_user_id,
+    createdAt: row.created_at,
+  };
+}
+
+export async function listChecklistItems(
+  db: D1Database,
+  cardId: number
+): Promise<ChecklistItemDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT * FROM kanban_card_checklist_items
+       WHERE card_id = ?
+       ORDER BY position ASC, id ASC`
+    )
+    .bind(cardId)
+    .all<RawChecklistRow>();
+  return (res.results ?? []).map(hydrateChecklistItem);
+}
+
+export async function createChecklistItem(
+  db: D1Database,
+  cardId: number,
+  body: string
+): Promise<ChecklistItemDto> {
+  const trimmed = body.trim();
+  if (!trimmed) throw new Error('Checklist item body is required');
+  const row = await db
+    .prepare(
+      `INSERT INTO kanban_card_checklist_items (card_id, position, body)
+       VALUES (
+         ?,
+         (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_card_checklist_items WHERE card_id = ?),
+         ?
+       )
+       RETURNING *`
+    )
+    .bind(cardId, cardId, trimmed)
+    .first<RawChecklistRow>();
+  if (!row) throw new Error('Failed to insert checklist item');
+  return hydrateChecklistItem(row);
+}
+
+export interface ChecklistItemPatch {
+  body?: string;
+  /** true = mark complete (sets completed_at = now); false = uncheck (set null). */
+  completed?: boolean;
+}
+
+/** Anyone authenticated can edit checklist items — they're sub-task notes,
+    not authoritative records. Returns the updated item or null if missing. */
+export async function updateChecklistItem(
+  db: D1Database,
+  id: number,
+  patch: ChecklistItemPatch
+): Promise<ChecklistItemDto | null> {
+  const sets: string[] = [];
+  const binds: Array<string | number | null> = [];
+  if (patch.body !== undefined) {
+    const trimmed = patch.body.trim();
+    if (!trimmed) return null;
+    sets.push('body = ?');
+    binds.push(trimmed);
+  }
+  if (patch.completed !== undefined) {
+    sets.push('completed_at = ?');
+    binds.push(patch.completed ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null);
+  }
+  if (sets.length === 0) {
+    const row = await db
+      .prepare(`SELECT * FROM kanban_card_checklist_items WHERE id = ?`)
+      .bind(id)
+      .first<RawChecklistRow>();
+    return row ? hydrateChecklistItem(row) : null;
+  }
+  binds.push(id);
+  const row = await db
+    .prepare(
+      `UPDATE kanban_card_checklist_items SET ${sets.join(', ')}
+       WHERE id = ? RETURNING *`
+    )
+    .bind(...binds)
+    .first<RawChecklistRow>();
+  return row ? hydrateChecklistItem(row) : null;
+}
+
+export interface DeletedChecklistRef {
+  id: number;
+  cardId: number;
+}
+
+export async function deleteChecklistItem(
+  db: D1Database,
+  id: number
+): Promise<DeletedChecklistRef | null> {
+  const row = await db
+    .prepare(
+      `DELETE FROM kanban_card_checklist_items WHERE id = ? RETURNING id, card_id`
+    )
+    .bind(id)
+    .first<{ id: number; card_id: number }>();
   return row ? { id: row.id, cardId: row.card_id } : null;
 }
 
