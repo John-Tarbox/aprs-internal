@@ -14,6 +14,13 @@
  * serializes every webSocketMessage call — and there is one DO instance
  * per board, so serialization is also per-board.
  */
+/**
+ * Default column set seeded onto every new board (S12 made columns
+ * per-board configurable, but these six remain the canonical defaults
+ * so pre-S12 boards keep their familiar layout). Pages that need a
+ * human-friendly label for a known key use legacyColumnLabel below;
+ * everything else falls back to the raw key.
+ */
 export const KANBAN_COLUMNS = [
   'not_started',
   'started',
@@ -23,10 +30,41 @@ export const KANBAN_COLUMNS = [
   'done',
 ] as const;
 
-export type ColumnName = (typeof KANBAN_COLUMNS)[number];
+const LEGACY_COLUMN_LABELS: Record<string, string> = {
+  not_started: 'Not Started',
+  started: 'Started',
+  blocked: 'Blocked',
+  ready: 'Ready',
+  approval: 'Approval',
+  done: 'Done',
+};
+
+/** Best-effort label for a column key — known defaults map to titles,
+ *  custom keys fall back to a humanized form of the key itself. */
+export function legacyColumnLabel(key: string): string {
+  return LEGACY_COLUMN_LABELS[key] ?? key
+    .split(/[_-]/)
+    .map((p) => (p ? p[0].toUpperCase() + p.slice(1) : p))
+    .join(' ');
+}
+
+// Post-S12 ColumnName is just a string — validation happens against
+// kanban_board_columns at service-mutation time, not at the type level.
+export type ColumnName = string;
 
 export function isColumnName(v: unknown): v is ColumnName {
-  return typeof v === 'string' && (KANBAN_COLUMNS as readonly string[]).includes(v);
+  return typeof v === 'string' && v.length > 0 && v.length <= 64;
+}
+
+/** Caller-provided column key sanity check. Lower-cased, slug-safe.
+ *  Empty / overlong / shape-bad → null. */
+export function normalizeColumnKey(input: string): string | null {
+  const s = input
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return s.length > 0 && s.length <= 64 ? s : null;
 }
 
 // ── Board DTO + CRUD ────────────────────────────────────────────────────
@@ -372,6 +410,25 @@ export interface BoardColumnConfigDto {
   position: number;
   /** Null = no limit. UI shows "(N/limit)" badge when set, red when N > limit. */
   wipLimit: number | null;
+}
+
+/**
+ * Quick lookup: does (boardId, columnName) exist in kanban_board_columns?
+ * Used by createCard / moveCard to validate the destination column.
+ */
+async function columnExists(
+  db: D1Database,
+  boardId: number,
+  columnName: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 as ok FROM kanban_board_columns
+       WHERE board_id = ? AND column_name = ? LIMIT 1`
+    )
+    .bind(boardId, columnName)
+    .first<{ ok: number }>();
+  return !!row;
 }
 
 export async function listBoardColumns(
@@ -776,6 +833,98 @@ export async function listCardsAssignedToUser(
   }));
 }
 
+/**
+ * Add a new column to a board. The key is normalized; on collision with
+ * an existing column the call is a no-op and returns the existing config
+ * row. New columns go to the end of the position order.
+ */
+export async function addBoardColumn(
+  db: D1Database,
+  boardId: number,
+  rawKey: string,
+  rawLabel: string
+): Promise<BoardColumnConfigDto | null> {
+  const key = normalizeColumnKey(rawKey);
+  const label = rawLabel.trim().slice(0, 64);
+  if (!key || !label) return null;
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO kanban_board_columns (board_id, column_name, label, position)
+       VALUES (?, ?, ?,
+         (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_board_columns WHERE board_id = ?)
+       )`
+    )
+    .bind(boardId, key, label, boardId)
+    .run();
+  const row = await db
+    .prepare(
+      `SELECT column_name, label, position, wip_limit
+       FROM kanban_board_columns WHERE board_id = ? AND column_name = ?`
+    )
+    .bind(boardId, key)
+    .first<{ column_name: string; label: string; position: number; wip_limit: number | null }>();
+  return row
+    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit }
+    : null;
+}
+
+export async function renameBoardColumn(
+  db: D1Database,
+  boardId: number,
+  columnName: string,
+  rawLabel: string
+): Promise<BoardColumnConfigDto | null> {
+  const label = rawLabel.trim().slice(0, 64);
+  if (!label) return null;
+  const row = await db
+    .prepare(
+      `UPDATE kanban_board_columns SET label = ?
+       WHERE board_id = ? AND column_name = ?
+       RETURNING column_name, label, position, wip_limit`
+    )
+    .bind(label, boardId, columnName)
+    .first<{ column_name: string; label: string; position: number; wip_limit: number | null }>();
+  return row
+    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit }
+    : null;
+}
+
+/**
+ * Remove a column. Refuses if any active card still lives there — the
+ * caller must move or archive those cards first. Returns true on
+ * successful delete, false if blocked by cards or missing.
+ */
+export async function removeBoardColumn(
+  db: D1Database,
+  boardId: number,
+  columnName: string
+): Promise<{ ok: boolean; reason?: 'has_cards' | 'not_found' | 'last_column' }> {
+  const cardRow = await db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM kanban_cards
+       WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
+    )
+    .bind(boardId, columnName)
+    .first<{ cnt: number }>();
+  if ((cardRow?.cnt ?? 0) > 0) return { ok: false, reason: 'has_cards' };
+
+  const remaining = await db
+    .prepare(`SELECT COUNT(*) as cnt FROM kanban_board_columns WHERE board_id = ?`)
+    .bind(boardId)
+    .first<{ cnt: number }>();
+  if ((remaining?.cnt ?? 0) <= 1) return { ok: false, reason: 'last_column' };
+
+  const res = await db
+    .prepare(
+      `DELETE FROM kanban_board_columns
+       WHERE board_id = ? AND column_name = ?`
+    )
+    .bind(boardId, columnName)
+    .run();
+  if ((res.meta?.changes ?? 0) === 0) return { ok: false, reason: 'not_found' };
+  return { ok: true };
+}
+
 export async function listActiveUserDirectory(
   db: D1Database
 ): Promise<AssigneeDto[]> {
@@ -928,6 +1077,11 @@ export async function createCard(
   userId: number | null
 ): Promise<CardDto> {
   const groups = normalizeGroups(input.groups);
+  // Validate the target column exists on this board (S12 — columns are
+  // now per-board, no longer a fixed enum).
+  if (!(await columnExists(db, boardId, input.column))) {
+    throw new Error(`Column "${input.column}" does not exist on this board`);
+  }
   // Append to the end of the target column on this board. MAX(position)
   // must only consider active (non-archived) cards — archived rows carry
   // position = -1 as a sentinel and must not influence new-card placement.
@@ -1139,6 +1293,13 @@ export async function moveCard(
   const boardId = current.board_id;
   const fromColumn = current.column_name;
   const fromPosition = current.position;
+
+  // Refuse moves to a column that doesn't exist on this board (S12).
+  // Same-column reorders are still valid even if the column is somehow
+  // missing — they don't change column_name — so only validate cross-column.
+  if (toColumn !== fromColumn && !(await columnExists(db, boardId, toColumn))) {
+    return null;
+  }
 
   // Clamp toPosition into the valid range for the destination (board, column).
   // Only active cards count — archived rows sit outside the position ordering.

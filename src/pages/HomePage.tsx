@@ -1,13 +1,24 @@
 import type { FC } from 'hono/jsx';
 import { raw } from 'hono/html';
 import { Layout } from './Layout';
-import { COLUMNS } from './KanbanPage';
 import type { AuthUser } from '../env';
 import type { ColumnName } from '../services/kanban.service';
 
+/** The home tile still highlights the six canonical columns even after
+ *  S12 made columns custom per-board — this is a *summary* of the default
+ *  structure, not a reflection of any single board. */
+const HOME_COLUMNS: Array<{ key: ColumnName; label: string }> = [
+  { key: 'not_started', label: 'Not Started' },
+  { key: 'started', label: 'Started' },
+  { key: 'blocked', label: 'Blocked' },
+  { key: 'ready', label: 'Ready' },
+  { key: 'approval', label: 'Approval' },
+  { key: 'done', label: 'Done' },
+];
+
 interface HomePageProps {
   user: AuthUser;
-  kanbanCounts: Record<ColumnName, number>;
+  kanbanCounts: Partial<Record<ColumnName, number>>;
 }
 
 const ROADMAP: Array<{ title: string; desc: string }> = [
@@ -23,8 +34,8 @@ const firstName = (u: AuthUser): string => {
   return localPart.charAt(0).toUpperCase() + localPart.slice(1);
 };
 
-const kanbanTotal = (counts: Record<ColumnName, number>): number =>
-  Object.values(counts).reduce((a, b) => a + b, 0);
+const kanbanTotal = (counts: Partial<Record<ColumnName, number>>): number =>
+  Object.values(counts).reduce((a: number, b) => a + (b ?? 0), 0);
 
 export const HomePage: FC<HomePageProps> = ({ user, kanbanCounts }) => {
   const name = firstName(user);
@@ -69,10 +80,10 @@ export const HomePage: FC<HomePageProps> = ({ user, kanbanCounts }) => {
             Shared real-time task board for the team. Drag cards between lanes; changes sync to everyone in sub-second.
           </p>
           <div class="home-stats">
-            {COLUMNS.map((col) => (
+            {HOME_COLUMNS.map((col) => (
               <span class="home-stat" title={col.label}>
                 <span class="home-stat-label">{col.label}</span>
-                <span class="home-stat-value">{kanbanCounts[col.key]}</span>
+                <span class="home-stat-value">{kanbanCounts[col.key] ?? 0}</span>
               </span>
             ))}
           </div>

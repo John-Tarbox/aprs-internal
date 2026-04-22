@@ -34,6 +34,7 @@ import {
   insertAttachment,
   listActiveUserDirectory,
   listAttachments,
+  listBoardColumns,
   listDistinctGroupNames,
 } from '../services/kanban.service';
 import { markNotificationsRead } from '../services/notifications.service';
@@ -247,9 +248,10 @@ kanbanRoutes.get('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  const [knownGroups, knownUsers] = await Promise.all([
+  const [knownGroups, knownUsers, columns] = await Promise.all([
     listDistinctGroupNames(c.env.DB),
     listActiveUserDirectory(c.env.DB),
+    listBoardColumns(c.env.DB, board.id),
   ]);
   return c.html(
     <KanbanPage
@@ -257,6 +259,7 @@ kanbanRoutes.get('/:slug', async (c) => {
       board={board}
       knownGroups={knownGroups}
       knownUsers={knownUsers}
+      columns={columns}
     />
   );
 });

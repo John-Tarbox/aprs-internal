@@ -19,7 +19,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import type { Env } from '../env';
 import {
-  KANBAN_COLUMNS,
+  addBoardColumn,
   archiveCard,
   createCard,
   createChecklistItem,
@@ -37,6 +37,8 @@ import {
   listComments,
   logCardEvent,
   moveCard,
+  removeBoardColumn,
+  renameBoardColumn,
   setColumnWipLimit,
   unarchiveCard,
   updateCard,
@@ -59,7 +61,12 @@ const MAX_NOTES = 10_000;
 const MAX_COMMENT = 5_000;
 const MAX_CHECKLIST_ITEM = 500;
 
-const columnEnum = z.enum(KANBAN_COLUMNS);
+// Post-S12, columns are arbitrary per-board strings, validated against
+// kanban_board_columns at the service layer rather than at the wire-
+// format layer. Kept as a permissive shape so a typo or bad-input case
+// returns 'invalid' / 'not_found' from the service rather than a Zod
+// rejection that the client might handle less gracefully.
+const columnEnum = z.string().min(1).max(64);
 
 const nullableStr = (max: number) =>
   z
@@ -217,6 +224,25 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     type: z.literal('delete_checklist_item'),
     clientMsgId: z.string().max(64),
     id: z.number().int().positive(),
+  }),
+  z.object({
+    // Staff+ adds a new column to this board. Key + label both supplied;
+    // the key is normalized server-side.
+    type: z.literal('add_column'),
+    clientMsgId: z.string().max(64),
+    key: z.string().min(1).max(64),
+    label: z.string().min(1).max(64),
+  }),
+  z.object({
+    type: z.literal('rename_column'),
+    clientMsgId: z.string().max(64),
+    column: columnEnum,
+    label: z.string().min(1).max(64),
+  }),
+  z.object({
+    type: z.literal('delete_column'),
+    clientMsgId: z.string().max(64),
+    column: columnEnum,
   }),
 ]);
 
@@ -668,6 +694,66 @@ export class KanbanBoardDO extends DurableObject<Env> {
             id: ref.id,
             cardId: ref.cardId,
           });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'add_column': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const config = await addBoardColumn(
+            this.env.DB,
+            attachment.boardId,
+            parsed.key,
+            parsed.label
+          );
+          if (!config) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({ type: 'column_added', column: config });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'rename_column': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const config = await renameBoardColumn(
+            this.env.DB,
+            attachment.boardId,
+            parsed.column,
+            parsed.label
+          );
+          if (!config) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
+            return;
+          }
+          this.broadcast({ type: 'column_renamed', column: config });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'delete_column': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const result = await removeBoardColumn(
+            this.env.DB,
+            attachment.boardId,
+            parsed.column
+          );
+          if (!result.ok) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: result.reason ?? 'invalid',
+            });
+            return;
+          }
+          this.broadcast({ type: 'column_removed', column: parsed.column });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

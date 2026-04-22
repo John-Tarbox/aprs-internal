@@ -15,7 +15,12 @@ import type { FC } from 'hono/jsx';
 import { raw } from 'hono/html';
 import { Layout } from './Layout';
 import type { AuthUser } from '../env';
-import type { AssigneeDto, BoardDto, ColumnName } from '../services/kanban.service';
+import type {
+  AssigneeDto,
+  BoardColumnConfigDto,
+  BoardDto,
+  ColumnName,
+} from '../services/kanban.service';
 
 interface KanbanPageProps {
   user: AuthUser;
@@ -23,18 +28,26 @@ interface KanbanPageProps {
   knownGroups: string[];
   /** Active-user directory for the assignee picker. */
   knownUsers: AssigneeDto[];
+  /** Per-board column config (S12). Server-rendered as the initial board
+   *  structure; the client rebuilds when columns are added/renamed/deleted. */
+  columns: BoardColumnConfigDto[];
 }
 
-export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
-  { key: 'not_started', label: 'Not Started' },
-  { key: 'started', label: 'Started' },
-  { key: 'blocked', label: 'Blocked' },
-  { key: 'ready', label: 'Ready' },
-  { key: 'approval', label: 'Approval' },
-  { key: 'done', label: 'Done' },
+/** Legacy default — kept only as a server-side fallback if a board has
+ *  no kanban_board_columns rows for some reason. Should never trigger
+ *  in practice because every new board is auto-seeded. */
+const FALLBACK_COLUMNS: Array<{ columnName: ColumnName; label: string; position: number; wipLimit: number | null }> = [
+  { columnName: 'not_started', label: 'Not Started', position: 0, wipLimit: null },
+  { columnName: 'started', label: 'Started', position: 1, wipLimit: null },
+  { columnName: 'blocked', label: 'Blocked', position: 2, wipLimit: null },
+  { columnName: 'ready', label: 'Ready', position: 3, wipLimit: null },
+  { columnName: 'approval', label: 'Approval', position: 4, wipLimit: null },
+  { columnName: 'done', label: 'Done', position: 5, wipLimit: null },
 ];
 
-export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, knownUsers }) => {
+export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, knownUsers, columns }) => {
+  const cols = columns.length > 0 ? columns : FALLBACK_COLUMNS;
+  const isStaff = user.roles.includes('admin') || user.roles.includes('staff');
   return (
     <Layout title={`Kanban · ${board.name}`} user={user}>
       <style>{kanbanCss}</style>
@@ -67,16 +80,26 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
       </div>
 
       <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
-        {COLUMNS.map((col) => (
-          <section class="kanban-col" data-col={col.key}>
+        {cols.map((col) => (
+          <section class="kanban-col" data-col={col.columnName}>
             <header class="kanban-col-head">
-              <span class="kanban-col-title">{col.label}</span>
-              <span class="kanban-col-count" data-col-count={col.key} aria-label="Card count"></span>
-              <button class="kanban-add" data-add-col={col.key} type="button" aria-label={`Add card to ${col.label}`}>+</button>
+              <span class="kanban-col-title" data-col-title={col.columnName}>{col.label}</span>
+              <span class="kanban-col-count" data-col-count={col.columnName} aria-label="Card count"></span>
+              {isStaff ? (
+                <button class="kanban-col-del" data-col-del={col.columnName} type="button" aria-label={`Delete column ${col.label}`} title="Delete column (must be empty)">×</button>
+              ) : null}
+              <button class="kanban-add" data-add-col={col.columnName} type="button" aria-label={`Add card to ${col.label}`}>+</button>
             </header>
-            <div class="kanban-col-body" data-col-body={col.key}></div>
+            <div class="kanban-col-body" data-col-body={col.columnName}></div>
           </section>
         ))}
+        {isStaff ? (
+          <section class="kanban-col kanban-col-add" id="kanban-col-add">
+            <button id="kanban-add-col-btn" type="button" class="kanban-add-col-btn" aria-label="Add a new column">
+              + Add column
+            </button>
+          </section>
+        ) : null}
       </div>
 
       <section id="kanban-archive" class="kanban-archive" hidden aria-label="Archived cards">
@@ -277,7 +300,26 @@ const kanbanCss = `
     padding: 4px 6px 8px; border-bottom: 1px solid rgba(128,128,128,0.2);
     margin-bottom: 8px;
   }
-  .kanban-col-title { font-weight: 600; font-size: 0.95em; flex: 1; }
+  .kanban-col-title { font-weight: 600; font-size: 0.95em; flex: 1; cursor: text; }
+  .kanban-col-title.kanban-col-title-edit {
+    background: rgba(128,128,128,0.15); border-radius: 3px; padding: 0 4px;
+  }
+  .kanban-col-del {
+    background: transparent; border: 1px solid transparent; border-radius: 4px;
+    width: 22px; height: 22px; cursor: pointer; color: inherit; opacity: 0.4;
+    font: inherit; line-height: 1;
+  }
+  .kanban-col-del:hover { opacity: 1; color: #b91c1c; border-color: rgba(185,28,28,0.4); }
+  .kanban-col-add {
+    background: transparent; border: 2px dashed rgba(128,128,128,0.3);
+    align-items: center; justify-content: center;
+    min-width: 160px; min-height: 80px;
+  }
+  .kanban-add-col-btn {
+    background: transparent; border: none; cursor: pointer; color: inherit;
+    font: inherit; opacity: 0.7; padding: 12px;
+  }
+  .kanban-add-col-btn:hover { opacity: 1; }
   .kanban-col-count {
     font-size: 0.8em; opacity: 0.7; padding: 2px 6px; border-radius: 999px;
     background: rgba(128,128,128,0.12); cursor: default;
@@ -1181,6 +1223,160 @@ const kanbanClientJs = `
     pendingClientMsgs.set(cmid, { type: 'set_wip_limit', column: col });
     send({ type: 'set_wip_limit', clientMsgId: cmid, column: col, wipLimit: newLimit });
   });
+
+  // ── Column management (S12) ─────────────────────────────────────────
+  // Staff rename a column by clicking its title (becomes contenteditable);
+  // deletes via × in the header (only succeeds if the column has no cards);
+  // creates a new column via the "+ Add column" pseudo-section at the
+  // right edge of the board.
+
+  function rebuildBoardStructure() {
+    // Sort current columns by position, then re-create section nodes to
+    // match. Card bodies start empty — renderAll() refills them.
+    var ordered = Array.from(columnConfig.values()).sort(function(a, b) {
+      return a.position - b.position;
+    });
+    // Save the "Add column" sentinel if present so we can append it after
+    // rebuilding the column sections.
+    var addSection = document.getElementById('kanban-col-add');
+    while (boardEl.firstChild) boardEl.removeChild(boardEl.firstChild);
+    ordered.forEach(function(col) {
+      boardEl.appendChild(buildColumnSection(col));
+    });
+    if (addSection) boardEl.appendChild(addSection);
+    // Re-bind drag-and-drop on every column body, and re-bind add-card
+    // handlers; the previous nodes were detached.
+    setupSortable();
+    boardEl.querySelectorAll('.kanban-add').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        openCreateModal(btn.getAttribute('data-add-col'));
+      });
+    });
+  }
+
+  function buildColumnSection(col) {
+    var sec = document.createElement('section');
+    sec.className = 'kanban-col';
+    sec.setAttribute('data-col', col.columnName);
+
+    var head = document.createElement('header');
+    head.className = 'kanban-col-head';
+
+    var title = document.createElement('span');
+    title.className = 'kanban-col-title';
+    title.setAttribute('data-col-title', col.columnName);
+    title.textContent = col.label;
+    head.appendChild(title);
+
+    var count = document.createElement('span');
+    count.className = 'kanban-col-count';
+    count.setAttribute('data-col-count', col.columnName);
+    count.setAttribute('aria-label', 'Card count');
+    head.appendChild(count);
+
+    if (currentUser.isStaff) {
+      var del = document.createElement('button');
+      del.className = 'kanban-col-del';
+      del.type = 'button';
+      del.setAttribute('data-col-del', col.columnName);
+      del.setAttribute('aria-label', 'Delete column ' + col.label);
+      del.title = 'Delete column (must be empty)';
+      del.textContent = '×';
+      head.appendChild(del);
+    }
+
+    var add = document.createElement('button');
+    add.className = 'kanban-add';
+    add.setAttribute('data-add-col', col.columnName);
+    add.type = 'button';
+    add.setAttribute('aria-label', 'Add card to ' + col.label);
+    add.textContent = '+';
+    head.appendChild(add);
+
+    sec.appendChild(head);
+
+    var body = document.createElement('div');
+    body.className = 'kanban-col-body';
+    body.setAttribute('data-col-body', col.columnName);
+    sec.appendChild(body);
+
+    return sec;
+  }
+
+  // Inline rename: dblclick on the title turns it editable; Enter or blur
+  // commits, Escape cancels.
+  boardEl.addEventListener('dblclick', function(e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('.kanban-col-title')) return;
+    if (!currentUser.isStaff) return;
+    var col = t.getAttribute('data-col-title');
+    var current = columnConfig.get(col);
+    var original = current ? current.label : t.textContent;
+    t.contentEditable = 'true';
+    t.classList.add('kanban-col-title-edit');
+    t.focus();
+    var range = document.createRange();
+    range.selectNodeContents(t);
+    var sel = window.getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    var done = false;
+    function commit() {
+      if (done) return; done = true;
+      t.contentEditable = 'false';
+      t.classList.remove('kanban-col-title-edit');
+      var newLabel = (t.textContent || '').trim();
+      if (!newLabel || newLabel === original) {
+        t.textContent = original;
+        return;
+      }
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'rename_column', column: col });
+      send({ type: 'rename_column', clientMsgId: cmid, column: col, label: newLabel });
+    }
+    function cancel() {
+      if (done) return; done = true;
+      t.contentEditable = 'false';
+      t.classList.remove('kanban-col-title-edit');
+      t.textContent = original;
+    }
+    t.addEventListener('blur', commit, { once: true });
+    t.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); commit(); t.blur(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); t.blur(); }
+    });
+  });
+
+  // Delete column (×).
+  boardEl.addEventListener('click', function(e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('.kanban-col-del')) return;
+    if (!currentUser.isStaff) return;
+    var col = t.getAttribute('data-col-del');
+    var cfg = columnConfig.get(col);
+    var label = cfg ? cfg.label : col;
+    if (!confirm('Delete column "' + label + '"? This requires the column to be empty.')) return;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'delete_column', column: col });
+    send({ type: 'delete_column', clientMsgId: cmid, column: col });
+  });
+
+  // "+ Add column" button.
+  var addColBtn = document.getElementById('kanban-add-col-btn');
+  if (addColBtn) {
+    addColBtn.addEventListener('click', function() {
+      var label = prompt('New column name?');
+      if (label === null) return;
+      label = label.trim();
+      if (!label) return;
+      // Derive a key from the label client-side; the server normalizes
+      // and may collide-merge with an existing column.
+      var key = label.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+      if (!key) { showToast('Could not derive a column key from that name.', 4000); return; }
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'add_column', key: key });
+      send({ type: 'add_column', clientMsgId: cmid, key: key, label: label });
+    });
+  }
 
   // Patch a single card's node in place (or add it if new).
   function upsertCard(card) {
@@ -2216,6 +2412,30 @@ const kanbanClientJs = `
           renderColumnHeaders();
         }
         return;
+      case 'column_added':
+        if (msg.column && msg.column.columnName) {
+          columnConfig.set(msg.column.columnName, msg.column);
+          rebuildBoardStructure();
+          renderAll();
+        }
+        return;
+      case 'column_renamed':
+        if (msg.column && msg.column.columnName) {
+          columnConfig.set(msg.column.columnName, msg.column);
+          // Label change doesn't require a structural rebuild — just patch
+          // the title text in place.
+          var titleEl = boardEl.querySelector('[data-col-title="' + msg.column.columnName + '"]');
+          if (titleEl) titleEl.textContent = msg.column.label;
+          renderColumnHeaders();
+        }
+        return;
+      case 'column_removed':
+        if (msg.column) {
+          columnConfig.delete(msg.column);
+          rebuildBoardStructure();
+          renderAll();
+        }
+        return;
       case 'ack':
         pendingClientMsgs.delete(msg.clientMsgId);
         if (!modalEl.hidden && saveBtn.disabled) closeModal();
@@ -2223,6 +2443,22 @@ const kanbanClientJs = `
       case 'nack':
         var pending = pendingClientMsgs.get(msg.clientMsgId);
         pendingClientMsgs.delete(msg.clientMsgId);
+        // Column-management nacks aren't modal-bound, so route them to
+        // toast messages with reason-specific text.
+        if (pending && (pending.type === 'add_column' || pending.type === 'rename_column' || pending.type === 'delete_column')) {
+          if (msg.reason === 'has_cards') {
+            showToast('Can’t delete a column that still has cards — move or archive them first.', 5000);
+          } else if (msg.reason === 'last_column') {
+            showToast('Can’t delete the last remaining column on a board.', 5000);
+          } else if (msg.reason === 'forbidden') {
+            showToast('Only staff+ can change board columns.', 4000);
+          } else if (msg.reason === 'not_found') {
+            showToast('That column no longer exists — refresh to see current state.', 4000);
+          } else {
+            showToast('Column update failed.', 4000);
+          }
+          return;
+        }
         if (msg.reason === 'version_conflict') {
           showToast('Someone else just updated this card — refreshed with latest.', 5000);
           if (pending && pending.type === 'update' && editingCardId === pending.id) {

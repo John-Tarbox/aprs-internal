@@ -134,7 +134,7 @@ export const CalendarPage: FC<CalendarPageProps> = ({ user, year, month, cards }
                   {dayCards.map((c) => (
                     <li>
                       <a class={`cal-card cal-card-${c.column}`} href={`/kanban/c/${c.id}`}
-                         title={`${c.title} (${COLUMN_LABEL[c.column]} on ${c.boardName})`}>
+                         title={`${c.title} (${COLUMN_LABEL[c.column] ?? c.column} on ${c.boardName})`}>
                         {c.dueTime ? <span class="cal-card-time">{c.dueTime}</span> : null}
                         <span class="cal-card-title">{c.title}</span>
                       </a>

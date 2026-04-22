@@ -69,7 +69,7 @@ export const MyCardsPage: FC<MyCardsPageProps> = ({ user, cards }) => {
                     <a class="my-item-link" href={`/kanban/c/${c.id}`}>
                       <div class="my-item-row">
                         <span class="my-item-title">{c.title}</span>
-                        <span class={`my-pill my-pill-${c.column}`}>{COLUMN_LABEL[c.column]}</span>
+                        <span class={`my-pill my-pill-${c.column}`}>{COLUMN_LABEL[c.column] ?? c.column}</span>
                       </div>
                       <div class="my-item-meta">
                         {c.startDate ? <span class="my-meta-chip">Start {c.startDate}</span> : null}
