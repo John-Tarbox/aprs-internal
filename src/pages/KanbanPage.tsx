@@ -61,8 +61,10 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
       </div>
 
       <div class="kanban-filters" id="kanban-filters" role="search" aria-label="Filter cards">
-        <input type="search" id="kf-search" class="kf-search" placeholder="Search title, notes, assignees, groups…"
-               aria-label="Search cards" autocomplete="off" />
+        <input type="search" id="kf-search" class="kf-search"
+               placeholder="Search… or operators: assigned:lion label:urgent column:done has:due is:overdue"
+               aria-label="Search cards" autocomplete="off"
+               title="Press / anywhere to focus this box. Operators: assigned:, label:, group:, column:, has:due|start|cover|notes, is:overdue|mine|archived|done" />
         <label class="kf-filter-toggle">
           <input type="checkbox" id="kf-mine" />
           <span>Mine</span>
@@ -370,6 +372,25 @@ const kanbanCss = `
     .kanban-card { background: #fff; }
   }
   .kanban-card:hover { border-color: rgba(128,128,128,0.6); }
+
+  /* Card aging (P1): visual fade for cards that haven't been touched in
+     a while. Done-column cards never age — they're done. The dashed
+     border on old cards is the strongest cue without becoming alarming. */
+  .kanban-card-aged-young { opacity: 0.85; }
+  .kanban-card-aged-mid { opacity: 0.7; border-style: dashed; }
+  .kanban-card-aged-old {
+    opacity: 0.55;
+    border-style: dashed;
+    border-color: rgba(220, 38, 38, 0.4);
+  }
+  .kanban-card-aged-old::before {
+    content: '⚠ stale';
+    display: block;
+    font-size: 0.7em;
+    opacity: 0.7;
+    margin-bottom: 4px;
+    color: var(--status-err-text, #b91c1c);
+  }
   .kanban-card-title { font-weight: 600; margin-bottom: 4px; word-break: break-word; }
   .kanban-card-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 0.8em; opacity: 0.8; }
   .kanban-chip { background: rgba(128,128,128,0.15); padding: 1px 6px; border-radius: 999px; }
@@ -1042,26 +1063,113 @@ const kanbanClientJs = `
     return y + '-' + m + '-' + day;
   }
 
+  // P3 — search operator parser. Tokens like assigned:foo / label:bar /
+  // column:done / has:due / is:overdue / is:mine / is:archived become
+  // AND-combined predicates. Bare words fall back to substring match
+  // across title/notes/groups/assignees/assigned. Tiny regex-shaped
+  // parser, no real grammar — enough for the UX without invariants
+  // beyond "every term must match."
+  var QUERY_OP_RE = /\b(assigned|label|group|column|has|is):([a-zA-Z0-9._@-]+)/g;
+
+  function parseQuery(raw) {
+    var operators = [];
+    var bareTerms = [];
+    if (!raw) return { operators: operators, bareTerms: bareTerms };
+    var working = String(raw).replace(QUERY_OP_RE, function(_match, key, value) {
+      operators.push({ key: key, value: String(value).toLowerCase() });
+      return ' ';
+    });
+    working.split(/\s+/).forEach(function(w) {
+      var t = w.trim();
+      if (t) bareTerms.push(t.toLowerCase());
+    });
+    return { operators: operators, bareTerms: bareTerms };
+  }
+
+  function groupNamesOf(card) {
+    if (!Array.isArray(card.groups)) return [];
+    return card.groups.map(function(g) {
+      return (g && typeof g === 'object') ? g.name : g;
+    });
+  }
+
+  function predicateMatches(card, op, today) {
+    var v = op.value;
+    var i, a, local, dn;
+    switch (op.key) {
+      case 'assigned':
+        if (Array.isArray(card.assignees)) {
+          for (i = 0; i < card.assignees.length; i++) {
+            a = card.assignees[i];
+            local = ((a.email || '').split('@')[0] || '').toLowerCase();
+            if (local.indexOf(v) === 0) return true;
+            dn = (a.displayName || '').toLowerCase();
+            if (dn.split(/\s+/).some(function(w) { return w.indexOf(v) === 0; })) return true;
+          }
+        }
+        if (card.assigned && card.assigned.toLowerCase().indexOf(v) >= 0) return true;
+        return false;
+      case 'label':
+      case 'group':
+        return groupNamesOf(card).some(function(n) {
+          return n.toLowerCase().indexOf(v) >= 0;
+        });
+      case 'column':
+        return String(card.column || '').toLowerCase().indexOf(v) >= 0;
+      case 'has':
+        if (v === 'due') return !!card.dueDate;
+        if (v === 'start') return !!card.startDate;
+        if (v === 'cover') return !!card.coverColor;
+        if (v === 'assignee') return Array.isArray(card.assignees) && card.assignees.length > 0;
+        if (v === 'label' || v === 'group') return groupNamesOf(card).length > 0;
+        if (v === 'notes') return !!(card.notes && card.notes.length > 0);
+        return false;
+      case 'is':
+        if (v === 'archived') return !!card.archivedAt;
+        if (v === 'mine') {
+          return Array.isArray(card.assignees) &&
+            card.assignees.some(function(a) { return a.userId === currentUser.id; });
+        }
+        if (v === 'overdue') {
+          return !!(card.dueDate && card.dueDate < today && card.column !== 'done');
+        }
+        if (v === 'done') return card.column === 'done';
+        return false;
+    }
+    return false;
+  }
+
   function cardMatches(card) {
     if (filterState.query) {
-      var q = filterState.query.toLowerCase();
-      var hay = '';
-      hay += (card.title || '').toLowerCase() + ' ';
-      hay += (card.notes || '').toLowerCase() + ' ';
-      hay += (card.assigned || '').toLowerCase() + ' ';
-      if (Array.isArray(card.groups)) hay += card.groups.join(' ').toLowerCase() + ' ';
-      if (Array.isArray(card.assignees)) {
-        hay += card.assignees.map(function(a) {
-          return (a.displayName || '') + ' ' + (a.email || '');
-        }).join(' ').toLowerCase();
+      var parsed = parseQuery(filterState.query);
+      var today = todayIso();
+      // Each operator is an AND-required predicate.
+      for (var i = 0; i < parsed.operators.length; i++) {
+        if (!predicateMatches(card, parsed.operators[i], today)) return false;
       }
-      if (hay.indexOf(q) < 0) return false;
+      // Bare-term substring match against the card's haystack.
+      if (parsed.bareTerms.length > 0) {
+        var hay = '';
+        hay += (card.title || '') + ' ';
+        hay += (card.notes || '') + ' ';
+        hay += (card.assigned || '') + ' ';
+        hay += groupNamesOf(card).join(' ') + ' ';
+        if (Array.isArray(card.assignees)) {
+          hay += card.assignees.map(function(a) {
+            return (a.displayName || '') + ' ' + (a.email || '');
+          }).join(' ');
+        }
+        hay = hay.toLowerCase();
+        for (var j = 0; j < parsed.bareTerms.length; j++) {
+          if (hay.indexOf(parsed.bareTerms[j]) < 0) return false;
+        }
+      }
     }
     if (filterState.mine) {
       var mine = false;
       if (Array.isArray(card.assignees)) {
-        for (var i = 0; i < card.assignees.length; i++) {
-          if (card.assignees[i].userId === currentUser.id) { mine = true; break; }
+        for (var k = 0; k < card.assignees.length; k++) {
+          if (card.assignees[k].userId === currentUser.id) { mine = true; break; }
         }
       }
       if (!mine) return false;
@@ -1553,9 +1661,27 @@ const kanbanClientJs = `
 
   // Build a card DOM node. Uses textContent throughout — card content is
   // user-supplied and must NEVER be concatenated into an HTML string.
+  // P1 — card aging. Returns a CSS class (or '') based on how long since
+  // the card was last touched. Done-column cards never age (they're done).
+  function ageClass(card) {
+    if (!card || !card.updatedAt) return '';
+    if (card.column === 'done') return '';
+    var s = String(card.updatedAt);
+    if (s.indexOf('T') < 0 && s.indexOf(' ') > 0) s = s.replace(' ', 'T') + 'Z';
+    var t = new Date(s).getTime();
+    if (isNaN(t)) return '';
+    var days = Math.floor((Date.now() - t) / 86400000);
+    if (days >= 60) return 'kanban-card-aged-old';
+    if (days >= 30) return 'kanban-card-aged-mid';
+    if (days >= 14) return 'kanban-card-aged-young';
+    return '';
+  }
+
   function renderCardNode(card) {
     var el = document.createElement('div');
     el.className = 'kanban-card';
+    var ac = ageClass(card);
+    if (ac) el.classList.add(ac);
     el.setAttribute('data-card-id', String(card.id));
     el.setAttribute('data-version', String(card.version));
 

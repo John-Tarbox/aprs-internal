@@ -28,6 +28,8 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
               <a href="/calendar">Calendar</a>
               <a href="/timeline">Timeline</a>
               <a href="/dashboard">Dashboard</a>
+              <button id="kbd-help-btn" type="button" class="link kbd-help-btn"
+                      title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts">?</button>
               <span class="who">
                 {user.displayName || user.email} · {user.roles.join(', ') || 'no role'}
               </span>
@@ -59,7 +61,49 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
         <footer class="foot">
           <small>Internal site · APRS Foundation · do not share externally</small>
         </footer>
+        {user ? (
+          <div id="kbd-help-overlay" class="kbd-overlay" hidden role="dialog" aria-label="Keyboard shortcuts">
+            <div class="kbd-overlay-inner">
+              <header class="kbd-overlay-head">
+                <h2>Keyboard shortcuts</h2>
+                <button type="button" id="kbd-help-close" class="link" aria-label="Close shortcuts">×</button>
+              </header>
+              <div class="kbd-overlay-body">
+                <section>
+                  <h3>Anywhere</h3>
+                  <ul>
+                    <li><kbd>?</kbd> Show this overlay</li>
+                    <li><kbd>Esc</kbd> Close overlay or modal · blur the focused field</li>
+                    <li><kbd>g</kbd> then <kbd>h</kbd> Home</li>
+                    <li><kbd>g</kbd> then <kbd>m</kbd> My Cards</li>
+                    <li><kbd>g</kbd> then <kbd>b</kbd> Boards</li>
+                    <li><kbd>g</kbd> then <kbd>t</kbd> Table</li>
+                    <li><kbd>g</kbd> then <kbd>c</kbd> Calendar</li>
+                    <li><kbd>g</kbd> then <kbd>l</kbd> Timeline</li>
+                    <li><kbd>g</kbd> then <kbd>d</kbd> Dashboard</li>
+                  </ul>
+                </section>
+                <section>
+                  <h3>On a board</h3>
+                  <ul>
+                    <li><kbd>/</kbd> Focus the search/filter box</li>
+                    <li><kbd>n</kbd> New card in the leftmost column</li>
+                  </ul>
+                </section>
+                <section>
+                  <h3>Search operators</h3>
+                  <ul class="kbd-ops">
+                    <li><code>assigned:lion</code> · <code>label:urgent</code> · <code>group:bug</code></li>
+                    <li><code>column:done</code> · <code>has:due</code> · <code>has:cover</code></li>
+                    <li><code>is:overdue</code> · <code>is:mine</code> · <code>is:archived</code></li>
+                  </ul>
+                </section>
+              </div>
+            </div>
+          </div>
+        ) : null}
         {user ? <script>{raw(notifClientJs)}</script> : null}
+        {user ? <script>{raw(kbdClientJs)}</script> : null}
       </body>
     </html>
   );
@@ -167,6 +211,50 @@ const css = `
   .notif-item-unread { background: rgba(37,99,235,0.06); }
   .notif-item-meta { font-size: 0.8em; opacity: 0.6; margin-top: 2px; }
   .notif-empty { padding: 20px; text-align: center; opacity: 0.6; font-style: italic; }
+
+  /* Keyboard-shortcut help overlay (P2). */
+  .kbd-help-btn {
+    margin-left: 4px; padding: 0 8px; font-weight: 600;
+    border: 1px solid rgba(128,128,128,0.4); border-radius: 999px;
+    text-decoration: none; opacity: 0.6; line-height: 1.4;
+  }
+  .kbd-help-btn:hover { opacity: 1; }
+  .kbd-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1300; padding: 16px;
+  }
+  .kbd-overlay[hidden] { display: none; }
+  .kbd-overlay-inner {
+    background: #fff; color: #111; border-radius: 8px; padding: 20px;
+    width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kbd-overlay-inner { background: #1a1a1a; color: #eee; }
+  }
+  .kbd-overlay-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 8px;
+  }
+  .kbd-overlay-head h2 { margin: 0; font-size: 1.1em; }
+  .kbd-overlay-body section { margin-top: 14px; }
+  .kbd-overlay-body h3 {
+    margin: 0 0 6px 0; font-size: 0.78em; text-transform: uppercase;
+    letter-spacing: 0.06em; opacity: 0.65; font-weight: 600;
+  }
+  .kbd-overlay-body ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 0.92em; }
+  .kbd-overlay-body kbd {
+    display: inline-block; min-width: 18px; padding: 1px 6px; margin-right: 4px;
+    border: 1px solid rgba(128,128,128,0.45); border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em; line-height: 1.2; text-align: center;
+    background: rgba(128,128,128,0.08);
+  }
+  .kbd-overlay-body code {
+    background: rgba(128,128,128,0.15); padding: 1px 5px; border-radius: 3px;
+    font-size: 0.9em;
+  }
+  .kbd-ops li { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
 `;
 
 // Small inline client. Polls the unread count on a slow interval and
@@ -299,5 +387,116 @@ const notifClientJs = `
 
   fetchUnreadCount();
   setInterval(fetchUnreadCount, POLL_INTERVAL_MS);
+})();
+`;
+
+// Keyboard shortcuts (P2). Lives in Layout so it works on every authed
+// page. Chord-style g <letter> for navigation (matches GitHub/Linear);
+// single-key shortcuts (?, /, n, Esc) work everywhere except inside an
+// editable element.
+const kbdClientJs = `
+(function() {
+  'use strict';
+  var overlay = document.getElementById('kbd-help-overlay');
+  var helpBtn = document.getElementById('kbd-help-btn');
+  var helpClose = document.getElementById('kbd-help-close');
+  if (!overlay) return;
+
+  function showHelp() { overlay.hidden = false; }
+  function hideHelp() { overlay.hidden = true; }
+
+  helpBtn && helpBtn.addEventListener('click', showHelp);
+  helpClose && helpClose.addEventListener('click', hideHelp);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) hideHelp(); });
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    var tag = (el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+
+  // Chord-state for "g <letter>" navigation. 700ms window after pressing g.
+  var chordPending = false;
+  var chordTimer = null;
+  function startChord() {
+    chordPending = true;
+    if (chordTimer) clearTimeout(chordTimer);
+    chordTimer = setTimeout(function() { chordPending = false; }, 700);
+  }
+  var chordTargets = {
+    h: '/',
+    m: '/my',
+    b: '/kanban',
+    t: '/table',
+    c: '/calendar',
+    l: '/timeline',
+    d: '/dashboard',
+  };
+
+  document.addEventListener('keydown', function(e) {
+    // Inside editable fields, only Esc to blur is honoured.
+    if (isTypingTarget(e.target)) {
+      if (e.key === 'Escape') {
+        try { e.target.blur(); } catch (_err) {}
+      }
+      return;
+    }
+
+    // Resolve a pending g-chord if it's the next keystroke.
+    if (chordPending) {
+      chordPending = false;
+      if (chordTimer) { clearTimeout(chordTimer); chordTimer = null; }
+      var dest = chordTargets[e.key];
+      if (dest) {
+        e.preventDefault();
+        location.assign(dest);
+      }
+      return;
+    }
+
+    // Esc closes the overlay if open.
+    if (e.key === 'Escape' && !overlay.hidden) {
+      e.preventDefault();
+      hideHelp();
+      return;
+    }
+
+    // ? opens the overlay. On most layouts ? is Shift+/, so e.key is '?'
+    // only when shift is held — accept either form.
+    if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+      e.preventDefault();
+      showHelp();
+      return;
+    }
+
+    // / focuses the kanban filter box if present on this page.
+    if (e.key === '/' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      var search = document.getElementById('kf-search');
+      if (search) {
+        e.preventDefault();
+        search.focus();
+        try { search.select(); } catch (_err) {}
+        return;
+      }
+    }
+
+    // n triggers the leftmost column's "+" button (new card in column 1).
+    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      var addBtn = document.querySelector('.kanban-add');
+      if (addBtn) {
+        e.preventDefault();
+        addBtn.click();
+        return;
+      }
+    }
+
+    // g starts a chord.
+    if (e.key === 'g' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      startChord();
+      return;
+    }
+  });
 })();
 `;
