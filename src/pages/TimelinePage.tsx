@@ -14,7 +14,8 @@
 import type { FC } from 'hono/jsx';
 import { Layout } from './Layout';
 import type { AuthUser } from '../env';
-import type { ColumnName, TimelineCardRow } from '../services/kanban.service';
+import type { TimelineCardRow } from '../services/kanban.service';
+import { colorForColumn } from '../util/colors';
 
 interface TimelinePageProps {
   user: AuthUser;
@@ -27,15 +28,6 @@ const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
-
-const COLUMN_COLOR: Record<ColumnName, string> = {
-  not_started: '#94a3b8',
-  started: '#38bdf8',
-  blocked: '#dc2626',
-  ready: '#a855f7',
-  approval: '#eab308',
-  done: '#22c55e',
-};
 
 function pad2(n: number): string { return n < 10 ? '0' + n : String(n); }
 
@@ -179,7 +171,10 @@ export const TimelinePage: FC<TimelinePageProps> = ({ user, year, month, cards }
               const x = leftGutter + (c.startDay - 1) * dayWidth;
               const w = (c.endDay - c.startDay + 1) * dayWidth - 2;
               const y = headerHeight + c.lane * (laneHeight + laneGap);
-              const fill = COLUMN_COLOR[c.column] ?? '#64748b';
+              // Per-board column color overrides legacy default if set;
+              //  TimelineCardRow doesn't carry the color yet (would need
+              //  a JOIN), so the helper falls back to the column-key default.
+              const fill = colorForColumn(c.column, null);
               const tooltip = `${c.title} · ${c.boardName}\n${c.startDate ?? ''}${c.dueDate ? ' → ' + c.dueDate : ''}`;
               return (
                 <a href={`/kanban/c/${c.id}`} class="tl-bar-link">

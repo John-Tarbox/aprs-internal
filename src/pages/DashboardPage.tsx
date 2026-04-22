@@ -16,6 +16,7 @@ import type {
   ColumnName,
   DailyEventCount,
 } from '../services/kanban.service';
+import { colorForColumn } from '../util/colors';
 
 interface DashboardPageProps {
   user: AuthUser;
@@ -39,14 +40,6 @@ const COLUMN_ORDER: ColumnName[] = [
   'not_started', 'started', 'blocked', 'ready', 'approval', 'done',
 ];
 
-const COLUMN_COLOR: Record<ColumnName, string> = {
-  not_started: '#94a3b8',
-  started: '#38bdf8',
-  blocked: '#dc2626',
-  ready: '#a855f7',
-  approval: '#eab308',
-  done: '#22c55e',
-};
 
 interface BarProps {
   label: string;
@@ -131,7 +124,7 @@ export const DashboardPage: FC<DashboardPageProps> = ({
               label={COLUMN_LABEL[c]}
               value={columnCounts[c] ?? 0}
               max={colMax}
-              color={COLUMN_COLOR[c]}
+              color={colorForColumn(c, null)}
             />
           ))}
         </div>

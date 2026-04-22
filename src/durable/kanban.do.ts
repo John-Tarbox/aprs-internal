@@ -39,7 +39,9 @@ import {
   moveCard,
   removeBoardColumn,
   renameBoardColumn,
+  setColumnColor,
   setColumnWipLimit,
+  setGroupColor,
   unarchiveCard,
   updateCard,
   updateChecklistItem,
@@ -48,6 +50,7 @@ import {
   type CardEventDto,
   type ColumnName,
 } from '../services/kanban.service';
+import { normalizeHexColor } from '../util/colors';
 import {
   createNotification,
   parseMentions,
@@ -98,6 +101,15 @@ const dueTimeSchema = z
   .nullable()
   .optional();
 
+// Hex color (#abc or #aabbcc). Server normalizes via normalizeHexColor
+// before storing — this regex is just first-line input validation so a
+// patently bad value gets rejected at the WS boundary.
+const colorSchema = z
+  .string()
+  .regex(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
+  .nullable()
+  .optional();
+
 const clientMsgSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('hello'),
@@ -115,6 +127,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     startDate: startDateSchema,
     dueDate: dueDateSchema,
     dueTime: dueTimeSchema,
+    coverColor: colorSchema,
   }),
   z.object({
     type: z.literal('update_card'),
@@ -130,6 +143,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
       startDate: startDateSchema,
       dueDate: dueDateSchema,
       dueTime: dueTimeSchema,
+      coverColor: colorSchema,
     }),
   }),
   z.object({
@@ -243,6 +257,20 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     type: z.literal('delete_column'),
     clientMsgId: z.string().max(64),
     column: columnEnum,
+  }),
+  z.object({
+    // Staff+ sets a column's color. null clears back to the legacy default.
+    type: z.literal('set_column_color'),
+    clientMsgId: z.string().max(64),
+    column: columnEnum,
+    color: colorSchema,
+  }),
+  z.object({
+    // Staff+ sets the color for a group/label on this board. null clears.
+    type: z.literal('set_group_color'),
+    clientMsgId: z.string().max(64),
+    name: z.string().min(1).max(MAX_FIELD),
+    color: colorSchema,
   }),
 ]);
 
@@ -378,6 +406,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
               startDate: parsed.startDate ?? null,
               dueDate: parsed.dueDate ?? null,
               dueTime: parsed.dueTime ?? null,
+              coverColor: parsed.coverColor ? normalizeHexColor(parsed.coverColor) : (parsed.coverColor ?? null),
             },
             attachment.userId
           );
@@ -413,11 +442,20 @@ export class KanbanBoardDO extends DurableObject<Env> {
             priorAssigneeIds = (before.results ?? []).map((r) => r.user_id);
           }
 
+          // Normalize coverColor in the patch before persisting so the
+          // canonical #aabbcc form is what hits the DB regardless of
+          // whether the client sent #abc.
+          const normalizedPatch = parsed.patch.coverColor !== undefined
+            ? {
+                ...parsed.patch,
+                coverColor: parsed.patch.coverColor ? normalizeHexColor(parsed.patch.coverColor) : null,
+              }
+            : parsed.patch;
           const updated = await updateCard(
             this.env.DB,
             parsed.id,
             parsed.version,
-            parsed.patch,
+            normalizedPatch,
             attachment.userId
           );
           if (!updated) {
@@ -754,6 +792,48 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'column_removed', column: parsed.column });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'set_column_color': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
+          const config = await setColumnColor(
+            this.env.DB,
+            attachment.boardId,
+            parsed.column,
+            norm
+          );
+          if (!config) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
+            return;
+          }
+          // Reuse the existing column_config_updated event — clients
+          // already re-render headers + colors on receipt.
+          this.broadcast({ type: 'column_config_updated', column: config });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'set_group_color': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
+          const group = await setGroupColor(
+            this.env.DB,
+            attachment.boardId,
+            parsed.name,
+            norm
+          );
+          if (!group) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({ type: 'group_color_updated', group });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

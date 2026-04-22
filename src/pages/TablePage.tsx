@@ -90,7 +90,7 @@ export const TablePage: FC<TablePageProps> = ({ user, rows, boards, filters, kno
                       data-column={r.columnLabel}
                       data-title={r.title}
                       data-assignees={r.assignees.map((a) => a.displayName || a.email).join(', ')}
-                      data-groups={r.groups.join(', ')}
+                      data-groups={r.groups.map((g) => g.name).join(', ')}
                       data-start={r.startDate ?? ''}
                       data-due={r.dueDate ?? ''}
                       data-updated={r.updatedAt}>
@@ -107,7 +107,14 @@ export const TablePage: FC<TablePageProps> = ({ user, rows, boards, filters, kno
                     <td>
                       {r.groups.length === 0 ? <span class="muted">—</span> : (
                         <span class="tbl-chips">
-                          {r.groups.map((g) => <span class="tbl-chip">{g}</span>)}
+                          {r.groups.map((g) => (
+                            <span
+                              class="tbl-chip"
+                              style={g.color ? `background: ${g.color}33; border: 1px solid ${g.color}66` : undefined}
+                            >
+                              {g.name}
+                            </span>
+                          ))}
                         </span>
                       )}
                     </td>

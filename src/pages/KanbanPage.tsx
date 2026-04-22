@@ -36,13 +36,13 @@ interface KanbanPageProps {
 /** Legacy default — kept only as a server-side fallback if a board has
  *  no kanban_board_columns rows for some reason. Should never trigger
  *  in practice because every new board is auto-seeded. */
-const FALLBACK_COLUMNS: Array<{ columnName: ColumnName; label: string; position: number; wipLimit: number | null }> = [
-  { columnName: 'not_started', label: 'Not Started', position: 0, wipLimit: null },
-  { columnName: 'started', label: 'Started', position: 1, wipLimit: null },
-  { columnName: 'blocked', label: 'Blocked', position: 2, wipLimit: null },
-  { columnName: 'ready', label: 'Ready', position: 3, wipLimit: null },
-  { columnName: 'approval', label: 'Approval', position: 4, wipLimit: null },
-  { columnName: 'done', label: 'Done', position: 5, wipLimit: null },
+const FALLBACK_COLUMNS: BoardColumnConfigDto[] = [
+  { columnName: 'not_started', label: 'Not Started', position: 0, wipLimit: null, color: null },
+  { columnName: 'started', label: 'Started', position: 1, wipLimit: null, color: null },
+  { columnName: 'blocked', label: 'Blocked', position: 2, wipLimit: null, color: null },
+  { columnName: 'ready', label: 'Ready', position: 3, wipLimit: null, color: null },
+  { columnName: 'approval', label: 'Approval', position: 4, wipLimit: null, color: null },
+  { columnName: 'done', label: 'Done', position: 5, wipLimit: null, color: null },
 ];
 
 export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, knownUsers, columns }) => {
@@ -81,10 +81,25 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
 
       <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
         {cols.map((col) => (
-          <section class="kanban-col" data-col={col.columnName}>
+          <section
+            class="kanban-col"
+            data-col={col.columnName}
+            data-col-color={col.color ?? ''}
+            style={col.color ? `--col-accent: ${col.color}` : undefined}
+          >
             <header class="kanban-col-head">
               <span class="kanban-col-title" data-col-title={col.columnName}>{col.label}</span>
               <span class="kanban-col-count" data-col-count={col.columnName} aria-label="Card count"></span>
+              {isStaff ? (
+                <input
+                  type="color"
+                  class="kanban-col-color"
+                  data-col-color-input={col.columnName}
+                  value={col.color ?? '#94a3b8'}
+                  aria-label={`Color for column ${col.label}`}
+                  title="Set column color"
+                />
+              ) : null}
               {isStaff ? (
                 <button class="kanban-col-del" data-col-del={col.columnName} type="button" aria-label={`Delete column ${col.label}`} title="Delete column (must be empty)">×</button>
               ) : null}
@@ -153,6 +168,12 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <label class="kf-due-time">Due Time
                 <input type="time" id="kf-due-time" />
               </label>
+            </div>
+            <div class="kf-cover-row">
+              <label class="kf-cover-label">Cover color
+                <input type="color" id="kf-cover" />
+              </label>
+              <button type="button" id="kf-cover-clear" class="btn kf-cover-clear">Clear</button>
             </div>
             <label>Notes
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
@@ -568,6 +589,39 @@ const kanbanCss = `
   .kf-due-date { flex: 2; margin: 0; }
   .kf-due-time { flex: 1; margin: 0; }
 
+  /* Card cover color picker in the modal. */
+  .kf-cover-row { display: flex; gap: 8px; align-items: end; margin-top: 12px; }
+  .kf-cover-label { flex: 0 0 auto; margin: 0; font-size: 0.9em; }
+  .kf-cover-label input { width: 60px; height: 32px; padding: 2px; cursor: pointer; }
+  .kf-cover-clear { padding: 6px 10px; font-size: 0.85em; }
+
+  /* Card cover stripe — thin top band when card.coverColor is set. */
+  .kanban-card-cover {
+    height: 6px; margin: -8px -10px 6px -10px;
+    border-radius: 6px 6px 0 0;
+  }
+
+  /* Column color: swatch in header (staff editable) + accent on body. */
+  .kanban-col-color {
+    width: 14px; height: 14px; border-radius: 4px; padding: 0;
+    border: 1px solid rgba(128,128,128,0.4); cursor: pointer;
+    flex-shrink: 0;
+  }
+  .kanban-col[data-col-color] .kanban-col-body {
+    border-top: 3px solid var(--col-accent, transparent);
+    padding-top: 6px;
+    margin-top: -1px;
+  }
+
+  /* Group/label chip — when a color is set, the chip background uses
+     a tint derived inline from the hex via the renderer. Staff get a
+     pointer cursor for the inline color picker. */
+  .kanban-chip-editable { cursor: pointer; }
+  .kanban-chip-color-input {
+    width: 0; height: 0; opacity: 0; border: none; padding: 0;
+    position: absolute;
+  }
+
   /* Multi-select assignees control in the modal — same shape as groups. */
   .kf-assignees-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .kf-assignees-label { font-size: 0.9em; }
@@ -632,7 +686,18 @@ const kanbanClientJs = `
   var startInput = document.getElementById('kf-start');
   var dueInput = document.getElementById('kf-due');
   var dueTimeInput = document.getElementById('kf-due-time');
+  var coverInput = document.getElementById('kf-cover');
+  var coverClearBtn = document.getElementById('kf-cover-clear');
   var notesInput = document.getElementById('kf-notes');
+  // Tracks whether the user explicitly set a cover via the picker.
+  // <input type=color> can't represent "no color"; we mirror that
+  // semantic with a separate boolean and the Clear button.
+  var coverSet = false;
+  coverInput.addEventListener('input', function() { coverSet = true; });
+  coverClearBtn.addEventListener('click', function() {
+    coverSet = false;
+    coverInput.value = '#000000';
+  });
   var errorEl = document.getElementById('kf-error');
   var cancelBtn = document.getElementById('kf-cancel');
   var archiveBtn = document.getElementById('kf-archive');
@@ -679,6 +744,29 @@ const kanbanClientJs = `
   // Populated by snapshot/column_config_updated; defaults to empty so
   // boards that pre-date the seed migration just show plain counts.
   var columnConfig = new Map();
+
+  // Per-group color directory for this board, indexed by group name
+  // (case-insensitive key). Built from snapshot card data and updated
+  // by group_color_updated broadcasts. Used to tint chips both in the
+  // card preview and in the modal's selectedGroups list.
+  var groupColors = new Map();
+  function groupColorKey(name) { return String(name || '').toLowerCase(); }
+  function setGroupColorLocal(name, color) {
+    if (!name) return;
+    if (color) groupColors.set(groupColorKey(name), color);
+    else groupColors.delete(groupColorKey(name));
+  }
+  function getGroupColorLocal(name) {
+    return groupColors.get(groupColorKey(name)) || null;
+  }
+  function ingestGroupsFromCard(card) {
+    if (!card || !Array.isArray(card.groups)) return;
+    card.groups.forEach(function(g) {
+      if (g && typeof g === 'object' && g.color) {
+        groupColors.set(groupColorKey(g.name), g.color);
+      }
+    });
+  }
 
   // Active-user directory for the assignee picker.
   var knownUsers = [];
@@ -846,8 +934,36 @@ const kanbanClientJs = `
     selectedGroups.forEach(function(g, idx) {
       var c = document.createElement('span');
       c.className = 'kanban-chip kf-group-chip';
+      // Tint chip with this group's color if one is set.
+      var color = getGroupColorLocal(g);
+      if (color) {
+        c.style.background = color + '33';
+        c.style.border = '1px solid ' + color + '66';
+      }
       var txt = document.createElement('span');
       txt.textContent = g;
+      // Staff: clicking the label opens an inline color picker that
+      // sets the per-board color for this group. Native <input type=color>
+      // is hidden offscreen and triggered programmatically — feels like
+      // clicking the chip directly opens a color picker.
+      if (currentUser.isStaff) {
+        c.classList.add('kanban-chip-editable');
+        c.title = 'Click to set color for label "' + g + '"';
+        var picker = document.createElement('input');
+        picker.type = 'color';
+        picker.className = 'kanban-chip-color-input';
+        picker.value = color || '#94a3b8';
+        picker.addEventListener('change', function() {
+          var cmid = nextClientMsgId();
+          pendingClientMsgs.set(cmid, { type: 'set_group_color', name: g });
+          send({ type: 'set_group_color', clientMsgId: cmid, name: g, color: picker.value });
+        });
+        c.appendChild(picker);
+        txt.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          picker.click();
+        });
+      }
       var x = document.createElement('button');
       x.type = 'button';
       x.className = 'kf-group-remove';
@@ -1258,6 +1374,10 @@ const kanbanClientJs = `
     var sec = document.createElement('section');
     sec.className = 'kanban-col';
     sec.setAttribute('data-col', col.columnName);
+    if (col.color) {
+      sec.setAttribute('data-col-color', col.color);
+      sec.style.setProperty('--col-accent', col.color);
+    }
 
     var head = document.createElement('header');
     head.className = 'kanban-col-head';
@@ -1275,6 +1395,15 @@ const kanbanClientJs = `
     head.appendChild(count);
 
     if (currentUser.isStaff) {
+      var picker = document.createElement('input');
+      picker.type = 'color';
+      picker.className = 'kanban-col-color';
+      picker.setAttribute('data-col-color-input', col.columnName);
+      picker.value = col.color || '#94a3b8';
+      picker.title = 'Set column color';
+      picker.setAttribute('aria-label', 'Color for column ' + col.label);
+      head.appendChild(picker);
+
       var del = document.createElement('button');
       del.className = 'kanban-col-del';
       del.type = 'button';
@@ -1344,6 +1473,20 @@ const kanbanClientJs = `
       if (ev.key === 'Enter') { ev.preventDefault(); commit(); t.blur(); }
       else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); t.blur(); }
     });
+  });
+
+  // Column color picker (staff). Native <input type=color> fires 'change'
+  // when the popover closes, so we don't bombard the server while the
+  // user is dragging the swatch.
+  boardEl.addEventListener('change', function(e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('.kanban-col-color')) return;
+    if (!currentUser.isStaff) return;
+    var col = t.getAttribute('data-col-color-input');
+    var newColor = t.value;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'set_column_color', column: col });
+    send({ type: 'set_column_color', clientMsgId: cmid, column: col, color: newColor });
   });
 
   // Delete column (×).
@@ -1416,6 +1559,13 @@ const kanbanClientJs = `
     el.setAttribute('data-card-id', String(card.id));
     el.setAttribute('data-version', String(card.version));
 
+    if (card.coverColor) {
+      var cover = document.createElement('div');
+      cover.className = 'kanban-card-cover';
+      cover.style.background = card.coverColor;
+      el.appendChild(cover);
+    }
+
     var titleEl = document.createElement('div');
     titleEl.className = 'kanban-card-title';
     titleEl.textContent = card.title;
@@ -1424,7 +1574,18 @@ const kanbanClientJs = `
     var meta = document.createElement('div');
     meta.className = 'kanban-card-meta';
     if (Array.isArray(card.groups)) {
-      card.groups.forEach(function(g) { meta.appendChild(chip(g)); });
+      card.groups.forEach(function(g) {
+        // Groups are now { name, color | null }; older snapshots may
+        // still send raw strings — handle both for forward compat.
+        var name = (g && typeof g === 'object') ? g.name : g;
+        var color = (g && typeof g === 'object') ? g.color : null;
+        var ch = chip(name);
+        if (color) {
+          ch.style.background = color + '33';
+          ch.style.border = '1px solid ' + color + '66';
+        }
+        meta.appendChild(ch);
+      });
     }
     if (Array.isArray(card.assignees)) {
       card.assignees.forEach(function(a) {
@@ -1956,6 +2117,8 @@ const kanbanClientJs = `
     startInput.value = '';
     dueInput.value = '';
     dueTimeInput.value = '';
+    coverInput.value = '#2563eb';
+    coverSet = false;
     notesInput.value = '';
     errorEl.hidden = true;
     archiveBtn.hidden = true;
@@ -1990,7 +2153,11 @@ const kanbanClientJs = `
     editingArchived = !!fromArchive;
     modalTitleEl.textContent = editingArchived ? 'Archived card' : 'Edit card';
     titleInput.value = card.title;
-    selectedGroups = Array.isArray(card.groups) ? card.groups.slice() : [];
+    // card.groups is { name, color }[] post-color migration; selectedGroups
+    // is plain string[] (the wire format for create/update). Map down.
+    selectedGroups = Array.isArray(card.groups)
+      ? card.groups.map(function(g) { return (g && typeof g === 'object') ? g.name : g; })
+      : [];
     renderSelectedGroups();
     groupsInput.value = '';
     selectedAssignees = Array.isArray(card.assignees) ? card.assignees.slice() : [];
@@ -2000,6 +2167,13 @@ const kanbanClientJs = `
     startInput.value = card.startDate || '';
     dueInput.value = card.dueDate || '';
     dueTimeInput.value = card.dueTime || '';
+    if (card.coverColor) {
+      coverInput.value = card.coverColor;
+      coverSet = true;
+    } else {
+      coverInput.value = '#2563eb';
+      coverSet = false;
+    }
     notesInput.value = card.notes || '';
     errorEl.hidden = true;
     // Archive and Restore are mutually exclusive: Archive only appears for
@@ -2065,6 +2239,7 @@ const kanbanClientJs = `
         startDate: startInput.value || null,
         dueDate: dueInput.value || null,
         dueTime: dueTimeInput.value || null,
+        coverColor: coverSet ? coverInput.value : null,
       });
       if (!ok) showFormError('Disconnected — try again when reconnected.');
     } else {
@@ -2087,6 +2262,7 @@ const kanbanClientJs = `
           startDate: startInput.value || null,
           dueDate: dueInput.value || null,
           dueTime: dueTimeInput.value || null,
+          coverColor: coverSet ? coverInput.value : null,
         },
       });
       if (!ok2) showFormError('Disconnected — try again when reconnected.');
@@ -2247,6 +2423,9 @@ const kanbanClientJs = `
         if (Array.isArray(msg.columns)) {
           msg.columns.forEach(function(c) { columnConfig.set(c.columnName, c); });
         }
+        // Build group-color directory from every card we just received.
+        groupColors.clear();
+        msg.cards.forEach(ingestGroupsFromCard);
         renderAll();
         // Deep-link from a notification: /kanban/<slug>?card=<id> auto-opens
         // that card's modal as soon as the snapshot lands. One-shot — strip
@@ -2264,9 +2443,11 @@ const kanbanClientJs = `
         } catch (_err) { /* best-effort */ }
         return;
       case 'card_created':
+        ingestGroupsFromCard(msg.card);
         upsertCard(msg.card);
         return;
       case 'card_updated':
+        ingestGroupsFromCard(msg.card);
         // Edits on archived cards come back here too; keep them in the
         // archivedCards map and re-render the drawer if visible.
         if (msg.card.archivedAt) {
@@ -2406,10 +2587,23 @@ const kanbanClientJs = `
         renderChecklist();
         return;
       case 'column_config_updated':
-        // Single column's config changed (e.g., WIP limit set/cleared).
+        // Single column's config changed (WIP limit, color, etc.).
         if (msg.column && msg.column.columnName) {
           columnConfig.set(msg.column.columnName, msg.column);
           renderColumnHeaders();
+          // Apply / clear the color accent and color-picker value.
+          var sec = boardEl.querySelector('[data-col="' + msg.column.columnName + '"]');
+          if (sec) {
+            if (msg.column.color) {
+              sec.setAttribute('data-col-color', msg.column.color);
+              sec.style.setProperty('--col-accent', msg.column.color);
+            } else {
+              sec.removeAttribute('data-col-color');
+              sec.style.removeProperty('--col-accent');
+            }
+            var picker = sec.querySelector('.kanban-col-color');
+            if (picker) picker.value = msg.column.color || '#94a3b8';
+          }
         }
         return;
       case 'column_added':
@@ -2434,6 +2628,15 @@ const kanbanClientJs = `
           columnConfig.delete(msg.column);
           rebuildBoardStructure();
           renderAll();
+        }
+        return;
+      case 'group_color_updated':
+        if (msg.group && msg.group.name) {
+          setGroupColorLocal(msg.group.name, msg.group.color);
+          // Re-render the board (chips on cards) and the modal's chip
+          // list if it's currently open.
+          renderAll();
+          if (!modalEl.hidden) renderSelectedGroups();
         }
         return;
       case 'ack':

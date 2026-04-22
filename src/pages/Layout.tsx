@@ -66,7 +66,29 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
 };
 
 const css = `
-  :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  :root {
+    color-scheme: light dark;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* Brand + accent — single blue used for primary actions, today
+       markers, focus rings, "live" indicators, and chart strokes. */
+    --brand: #2563eb;
+    --brand-tint-strong: rgba(37, 99, 235, 0.45);
+    --brand-tint-weak: rgba(37, 99, 235, 0.14);
+    /* Status palette — solid for borders/text, _bg variants for
+       low-alpha fills behind status text. */
+    --status-ok:    #22c55e;  --status-ok-text:    #16a34a;
+    --status-err:   #dc2626;  --status-err-text:   #b91c1c;
+    --status-warn:  #eab308;
+    --status-info:  #38bdf8;
+    --status-ok-bg:    rgba(34, 197, 94, 0.15);
+    --status-err-bg:   rgba(239, 68, 68, 0.15);
+    --status-warn-bg:  rgba(234, 179, 8, 0.15);
+    --status-info-bg:  rgba(56, 189, 248, 0.18);
+    /* Accent — accent-color cascades to native checkboxes, radios,
+       range sliders, and progress bars. One declaration recolors the
+       whole site's form chrome. */
+    accent-color: #2563eb;
+  }
   body { margin: 0; }
   .top {
     display: flex; justify-content: space-between; align-items: center;
@@ -86,7 +108,7 @@ const css = `
     border: 1px solid rgba(128,128,128,0.4); background: transparent;
     color: inherit; text-decoration: none; cursor: pointer; font: inherit;
   }
-  .btn-primary { background: #2563eb; color: white; border-color: #2563eb; }
+  .btn-primary { background: var(--brand); color: white; border-color: var(--brand); }
   .btn:hover { opacity: 0.9; }
   .card { border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 20px; margin: 16px 0; }
   table { border-collapse: collapse; width: 100%; margin: 16px 0; }
@@ -95,8 +117,8 @@ const css = `
   input, select { font: inherit; padding: 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 4px; background: transparent; color: inherit; }
   label { display: block; margin: 12px 0 4px; font-size: 0.9em; }
   .flash { padding: 12px 16px; border-radius: 6px; margin: 16px 0; }
-  .flash-ok  { background: rgba(34,197,94,0.15);  border: 1px solid rgba(34,197,94,0.4); }
-  .flash-err { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); }
+  .flash-ok  { background: var(--status-ok-bg);  border: 1px solid rgba(34,197,94,0.4); }
+  .flash-err { background: var(--status-err-bg); border: 1px solid rgba(239,68,68,0.4); }
   .muted { opacity: 0.6; font-size: 0.9em; }
 
   /* Notification bell + dropdown. */
@@ -108,7 +130,7 @@ const css = `
   .notif-icon { font-size: 1.2em; }
   .notif-count {
     position: absolute; top: -2px; right: -4px;
-    background: #dc2626; color: #fff; font-size: 0.7em;
+    background: var(--status-err); color: #fff; font-size: 0.7em;
     min-width: 16px; height: 16px; border-radius: 999px;
     display: inline-flex; align-items: center; justify-content: center; padding: 0 4px;
   }

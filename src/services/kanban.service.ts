@@ -221,14 +221,24 @@ export interface AssigneeDto {
   email: string;
 }
 
+/** Card group/label with optional per-board color. Color is null until
+ *  someone (staff) explicitly sets one via setGroupColor; the UI then
+ *  tints chips with `tintFromHex`. */
+export interface GroupDto {
+  name: string;
+  color: string | null;
+}
+
 export interface CardDto {
   id: number;
   boardId: number;
   column: ColumnName;
   position: number;
   title: string;
-  /** Zero or more group labels. Always an array; empty when unset. */
-  groups: string[];
+  /** Zero or more group labels with optional per-board colors. Always
+   *  an array; empty when unset. (Pre-color schema returned `string[]`;
+   *  we kept the order semantics and just added the color field.) */
+  groups: GroupDto[];
   /** Multi-assignee FK list (S5). Empty when nobody is assigned. */
   assignees: AssigneeDto[];
   /** Legacy free-text assigned field (pre-S5). Retained alongside assignees. */
@@ -239,6 +249,8 @@ export interface CardDto {
   dueDate: string | null;
   /** HH:MM (24h) or null. When set, due_date carries an explicit time. */
   dueTime: string | null;
+  /** Optional per-card cover color (#aabbcc). Null = no cover. */
+  coverColor: string | null;
   /** ISO timestamp when the card was archived (soft-deleted); null when active. */
   archivedAt: string | null;
   version: number;
@@ -259,6 +271,7 @@ interface RawCardRow {
   start_date: string | null;
   due_date: string | null;
   due_time: string | null;
+  cover_color: string | null;
   archived_at: string | null;
   version: number;
   created_by_user_id: number | null;
@@ -269,7 +282,7 @@ interface RawCardRow {
 
 function hydrateCard(
   row: RawCardRow,
-  groups: string[],
+  groups: GroupDto[],
   assignees: AssigneeDto[]
 ): CardDto {
   return {
@@ -285,6 +298,7 @@ function hydrateCard(
     startDate: row.start_date,
     dueDate: row.due_date,
     dueTime: row.due_time,
+    coverColor: row.cover_color,
     archivedAt: row.archived_at,
     version: row.version,
     createdByUserId: row.created_by_user_id,
@@ -294,31 +308,38 @@ function hydrateCard(
   };
 }
 
-/** Fetch groups for a set of card ids in one query; returns a map cardId -> groups[]. */
+/** Fetch groups (with per-board colors) for a set of card ids in one
+ *  query. Joins kanban_groups via the card's board_id so colors set on
+ *  one board don't bleed into another's same-named group. */
 async function loadGroupsForCards(
   db: D1Database,
   cardIds: number[]
-): Promise<Map<number, string[]>> {
-  const map = new Map<number, string[]>();
+): Promise<Map<number, GroupDto[]>> {
+  const map = new Map<number, GroupDto[]>();
   if (cardIds.length === 0) return map;
   const placeholders = cardIds.map(() => '?').join(',');
   const res = await db
     .prepare(
-      `SELECT card_id, group_name FROM kanban_card_groups
-       WHERE card_id IN (${placeholders})
-       ORDER BY card_id ASC, group_name ASC`
+      `SELECT cg.card_id, cg.group_name, kg.color
+       FROM kanban_card_groups cg
+       JOIN kanban_cards c ON c.id = cg.card_id
+       LEFT JOIN kanban_groups kg
+         ON kg.board_id = c.board_id AND kg.name = cg.group_name
+       WHERE cg.card_id IN (${placeholders})
+       ORDER BY cg.card_id ASC, cg.group_name ASC`
     )
     .bind(...cardIds)
-    .all<{ card_id: number; group_name: string }>();
+    .all<{ card_id: number; group_name: string; color: string | null }>();
   for (const row of res.results ?? []) {
+    const dto: GroupDto = { name: row.group_name, color: row.color };
     const list = map.get(row.card_id);
-    if (list) list.push(row.group_name);
-    else map.set(row.card_id, [row.group_name]);
+    if (list) list.push(dto);
+    else map.set(row.card_id, [dto]);
   }
   return map;
 }
 
-async function loadGroupsForCard(db: D1Database, cardId: number): Promise<string[]> {
+async function loadGroupsForCard(db: D1Database, cardId: number): Promise<GroupDto[]> {
   const map = await loadGroupsForCards(db, [cardId]);
   return map.get(cardId) ?? [];
 }
@@ -410,6 +431,9 @@ export interface BoardColumnConfigDto {
   position: number;
   /** Null = no limit. UI shows "(N/limit)" badge when set, red when N > limit. */
   wipLimit: number | null;
+  /** Optional explicit color override. Null = use legacy default for the
+   *  six canonical keys, fallback gray for custom keys. */
+  color: string | null;
 }
 
 /**
@@ -437,18 +461,19 @@ export async function listBoardColumns(
 ): Promise<BoardColumnConfigDto[]> {
   const res = await db
     .prepare(
-      `SELECT column_name, label, position, wip_limit
+      `SELECT column_name, label, position, wip_limit, color
        FROM kanban_board_columns
        WHERE board_id = ?
        ORDER BY position ASC`
     )
     .bind(boardId)
-    .all<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null }>();
+    .all<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null; color: string | null }>();
   return (res.results ?? []).map((r) => ({
     columnName: r.column_name,
     label: r.label,
     position: r.position,
     wipLimit: r.wip_limit,
+    color: r.color,
   }));
 }
 
@@ -469,17 +494,87 @@ export async function setColumnWipLimit(
       `UPDATE kanban_board_columns
        SET wip_limit = ?
        WHERE board_id = ? AND column_name = ?
-       RETURNING column_name, label, position, wip_limit`
+       RETURNING column_name, label, position, wip_limit, color`
     )
     .bind(limit, boardId, columnName)
-    .first<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null }>();
+    .first<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null; color: string | null }>();
   if (!row) return null;
   return {
     columnName: row.column_name,
     label: row.label,
     position: row.position,
     wipLimit: row.wip_limit,
+    color: row.color,
   };
+}
+
+/** Set (or clear with null) a column's color. Caller must pre-validate
+ *  the hex via normalizeHexColor; we just write it through. */
+export async function setColumnColor(
+  db: D1Database,
+  boardId: number,
+  columnName: ColumnName,
+  color: string | null
+): Promise<BoardColumnConfigDto | null> {
+  const row = await db
+    .prepare(
+      `UPDATE kanban_board_columns SET color = ?
+       WHERE board_id = ? AND column_name = ?
+       RETURNING column_name, label, position, wip_limit, color`
+    )
+    .bind(color, boardId, columnName)
+    .first<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null; color: string | null }>();
+  if (!row) return null;
+  return {
+    columnName: row.column_name,
+    label: row.label,
+    position: row.position,
+    wipLimit: row.wip_limit,
+    color: row.color,
+  };
+}
+
+// ── Group color metadata (per board) ────────────────────────────────────
+
+export async function listGroupsForBoard(
+  db: D1Database,
+  boardId: number
+): Promise<GroupDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT name, color FROM kanban_groups
+       WHERE board_id = ?
+       ORDER BY name ASC`
+    )
+    .bind(boardId)
+    .all<{ name: string; color: string | null }>();
+  return (res.results ?? []).map((r) => ({ name: r.name, color: r.color }));
+}
+
+/** Upsert: if the group doesn't exist for this board (rare — usually
+ *  it's created when a card uses it for the first time), create it.
+ *  Then set color (null clears). Returns the resulting row. */
+export async function setGroupColor(
+  db: D1Database,
+  boardId: number,
+  name: string,
+  color: string | null
+): Promise<GroupDto | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  await db
+    .prepare(`INSERT OR IGNORE INTO kanban_groups (board_id, name) VALUES (?, ?)`)
+    .bind(boardId, trimmed)
+    .run();
+  const row = await db
+    .prepare(
+      `UPDATE kanban_groups SET color = ?
+       WHERE board_id = ? AND name = ?
+       RETURNING name, color`
+    )
+    .bind(color, boardId, trimmed)
+    .first<{ name: string; color: string | null }>();
+  return row ? { name: row.name, color: row.color } : null;
 }
 
 // ── Table view (S15) — flat queryable list of active cards ──────────────
@@ -494,7 +589,7 @@ export interface TableCardRow {
   position: number;
   title: string;
   assignees: AssigneeDto[];
-  groups: string[];
+  groups: GroupDto[];
   assigned: string | null;
   startDate: string | null;
   dueDate: string | null;
@@ -1038,13 +1133,13 @@ export async function addBoardColumn(
     .run();
   const row = await db
     .prepare(
-      `SELECT column_name, label, position, wip_limit
+      `SELECT column_name, label, position, wip_limit, color
        FROM kanban_board_columns WHERE board_id = ? AND column_name = ?`
     )
     .bind(boardId, key)
-    .first<{ column_name: string; label: string; position: number; wip_limit: number | null }>();
+    .first<{ column_name: string; label: string; position: number; wip_limit: number | null; color: string | null }>();
   return row
-    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit }
+    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit, color: row.color }
     : null;
 }
 
@@ -1060,12 +1155,12 @@ export async function renameBoardColumn(
     .prepare(
       `UPDATE kanban_board_columns SET label = ?
        WHERE board_id = ? AND column_name = ?
-       RETURNING column_name, label, position, wip_limit`
+       RETURNING column_name, label, position, wip_limit, color`
     )
     .bind(label, boardId, columnName)
-    .first<{ column_name: string; label: string; position: number; wip_limit: number | null }>();
+    .first<{ column_name: string; label: string; position: number; wip_limit: number | null; color: string | null }>();
   return row
-    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit }
+    ? { columnName: row.column_name, label: row.label, position: row.position, wipLimit: row.wip_limit, color: row.color }
     : null;
 }
 
@@ -1248,6 +1343,8 @@ export interface CreateCardInput {
   startDate?: string | null;
   dueDate?: string | null;
   dueTime?: string | null;
+  /** Optional cover color (#aabbcc). Null/undefined = no cover. */
+  coverColor?: string | null;
 }
 
 export async function createCard(
@@ -1269,14 +1366,14 @@ export async function createCard(
     .prepare(
       `INSERT INTO kanban_cards
          (board_id, column_name, position, title, assigned, notes,
-          start_date, due_date, due_time,
+          start_date, due_date, due_time, cover_color,
           created_by_user_id, updated_by_user_id)
        VALUES (
          ?,
          ?,
          (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
            WHERE board_id = ? AND column_name = ? AND archived_at IS NULL),
-         ?, ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?, ?
        )
        RETURNING *`
     )
@@ -1291,6 +1388,7 @@ export async function createCard(
       input.startDate ?? null,
       input.dueDate ?? null,
       input.dueTime ?? null,
+      input.coverColor ?? null,
       userId,
       userId
     )
@@ -1298,21 +1396,35 @@ export async function createCard(
 
   if (!row) throw new Error('Failed to insert kanban card');
   if (groups.length > 0) {
-    await db.batch(
-      groups.map((g) =>
+    // Two writes per group: (1) ensure a kanban_groups row exists for
+    // this (board, name) so future setGroupColor calls have something to
+    // update; (2) link the card to the group via the existing junction.
+    const stmts = [];
+    for (const g of groups) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO kanban_groups (board_id, name) VALUES (?, ?)`
+          )
+          .bind(boardId, g)
+      );
+      stmts.push(
         db
           .prepare(
             `INSERT OR IGNORE INTO kanban_card_groups (card_id, group_name) VALUES (?, ?)`
           )
           .bind(row.id, g)
-      )
-    );
+      );
+    }
+    await db.batch(stmts);
   }
   if (input.assigneeUserIds && input.assigneeUserIds.length > 0) {
     await setCardAssignees(db, row.id, input.assigneeUserIds);
   }
   const assignees = await loadAssigneesForCard(db, row.id);
-  return hydrateCard(row, groups, assignees);
+  // Reload groups with color now that they've been ensured in kanban_groups.
+  const groupDtos = await loadGroupsForCard(db, row.id);
+  return hydrateCard(row, groupDtos, assignees);
 }
 
 export interface UpdateCardPatch {
@@ -1326,6 +1438,8 @@ export interface UpdateCardPatch {
   startDate?: string | null;
   dueDate?: string | null;
   dueTime?: string | null;
+  /** Undefined = don't touch; null = clear cover; '#aabbcc' = set. */
+  coverColor?: string | null;
 }
 
 /** Returns the updated card, or null on version conflict / not found. */
@@ -1362,6 +1476,10 @@ export async function updateCard(
   if (patch.dueTime !== undefined) {
     sets.push('due_time = ?');
     binds.push(patch.dueTime ?? null);
+  }
+  if (patch.coverColor !== undefined) {
+    sets.push('cover_color = ?');
+    binds.push(patch.coverColor ?? null);
   }
 
   const normalizedGroups =
@@ -1403,26 +1521,35 @@ export async function updateCard(
   if (!row) return null;
 
   if (normalizedGroups !== undefined) {
-    const stmts = [
-      db.prepare(`DELETE FROM kanban_card_groups WHERE card_id = ?`).bind(id),
-      ...normalizedGroups.map((g) =>
+    // Same auto-insert pattern as createCard: ensure each named group
+    // exists in kanban_groups for this card's board before linking it.
+    const stmts: ReturnType<typeof db.prepare>[] = [
+      db.prepare(`DELETE FROM kanban_card_groups WHERE card_id = ?`).bind(id) as ReturnType<typeof db.prepare>,
+    ];
+    for (const g of normalizedGroups) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO kanban_groups (board_id, name)
+             SELECT board_id, ? FROM kanban_cards WHERE id = ?`
+          )
+          .bind(g, id)
+      );
+      stmts.push(
         db
           .prepare(
             `INSERT OR IGNORE INTO kanban_card_groups (card_id, group_name) VALUES (?, ?)`
           )
           .bind(id, g)
-      ),
-    ];
+      );
+    }
     await db.batch(stmts);
   }
   if (patch.assigneeUserIds !== undefined) {
     await setCardAssignees(db, id, patch.assigneeUserIds);
   }
 
-  const finalGroups =
-    normalizedGroups !== undefined
-      ? normalizedGroups
-      : await loadGroupsForCard(db, id);
+  const finalGroups = await loadGroupsForCard(db, id);
   const finalAssignees = await loadAssigneesForCard(db, id);
   return hydrateCard(row, finalGroups, finalAssignees);
 }
