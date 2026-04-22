@@ -728,10 +728,11 @@ const kanbanCss = `
   }
   .ws-trigger-arrow { font-size: 0.75em; opacity: 0.6; }
 
-  /* Web-safe color picker popover. Anchored absolutely; positioned in JS
-     near the trigger that opened it. Single shared instance per page. */
+  /* Web-safe color picker popover. Fixed-position (viewport-relative)
+     so it lands predictably regardless of any positioned ancestor.
+     Positioned in JS via rect.bottom/rect.left at click-time. */
   .ws-picker {
-    position: absolute; z-index: 1500;
+    position: fixed; z-index: 1500; display: block;
     background: #fff; color: #111;
     border: 1px solid rgba(128,128,128,0.35);
     border-radius: 8px; padding: 10px;
@@ -1275,15 +1276,25 @@ const kanbanClientJs = `
     // Position absolutely near the anchor's bottom-left, within the
     // viewport. Render then nudge if it would overflow the right edge.
     wsPickerEl.hidden = false;
+    // position: fixed → coords are viewport-relative, so we use the
+    // rect directly with no scroll offsets. Nudge left if the picker
+    // would overflow the right edge; nudge up if it'd overflow the
+    // bottom (open above the trigger in that case).
     var rect = opts.anchor.getBoundingClientRect();
-    var top = rect.bottom + window.scrollY + 4;
-    var left = rect.left + window.scrollX;
+    var top = rect.bottom + 4;
+    var left = rect.left;
     wsPickerEl.style.top = top + 'px';
     wsPickerEl.style.left = left + 'px';
     var pickerRect = wsPickerEl.getBoundingClientRect();
-    var overflowX = (pickerRect.right) - window.innerWidth;
+    var overflowX = pickerRect.right - window.innerWidth;
     if (overflowX > 0) {
-      wsPickerEl.style.left = (left - overflowX - 8) + 'px';
+      wsPickerEl.style.left = Math.max(8, left - overflowX - 8) + 'px';
+    }
+    var overflowY = pickerRect.bottom - window.innerHeight;
+    if (overflowY > 0) {
+      // Flip above the trigger so the whole picker stays on-screen.
+      var flippedTop = rect.top - pickerRect.height - 4;
+      wsPickerEl.style.top = Math.max(8, flippedTop) + 'px';
     }
   }
 
