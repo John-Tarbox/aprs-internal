@@ -165,9 +165,12 @@ kanbanRoutes.get('/:slug/ws', async (c) => {
       'X-User-Id': String(user.id),
       'X-User-Email': user.email,
       'X-User-Display-Name': user.displayName ?? '',
-      // Forward admin status so the DO can authorize sensitive operations
-      // (e.g. deleting other users' comments) without a per-message DB hit.
+      // Forward admin/staff status so the DO can authorize sensitive
+      // operations (e.g. deleting other users' comments, setting WIP
+      // limits) without a per-message DB hit.
       'X-User-Is-Admin': user.roles.includes('admin') ? '1' : '0',
+      'X-User-Is-Staff':
+        user.roles.includes('admin') || user.roles.includes('staff') ? '1' : '0',
       'X-Board-Id': String(board.id),
     },
   });

@@ -47,11 +47,31 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         </button>
       </div>
 
+      <div class="kanban-filters" id="kanban-filters" role="search" aria-label="Filter cards">
+        <input type="search" id="kf-search" class="kf-search" placeholder="Search title, notes, assignees, groups…"
+               aria-label="Search cards" autocomplete="off" />
+        <label class="kf-filter-toggle">
+          <input type="checkbox" id="kf-mine" />
+          <span>Mine</span>
+        </label>
+        <label class="kf-filter-toggle">
+          <input type="checkbox" id="kf-overdue" />
+          <span>Overdue</span>
+        </label>
+        <label class="kf-filter-toggle">
+          <input type="checkbox" id="kf-has-due" />
+          <span>Has due date</span>
+        </label>
+        <button type="button" id="kf-clear" class="btn kf-clear" hidden>Clear</button>
+        <span id="kf-count" class="kf-count" aria-live="polite"></span>
+      </div>
+
       <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
         {COLUMNS.map((col) => (
           <section class="kanban-col" data-col={col.key}>
             <header class="kanban-col-head">
               <span class="kanban-col-title">{col.label}</span>
+              <span class="kanban-col-count" data-col-count={col.key} aria-label="Card count"></span>
               <button class="kanban-add" data-add-col={col.key} type="button" aria-label={`Add card to ${col.label}`}>+</button>
             </header>
             <div class="kanban-col-body" data-col-body={col.key}></div>
@@ -100,9 +120,17 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
             <label>Assigned (legacy text — for non-users)
               <input type="text" id="kf-assigned" maxlength={100} />
             </label>
-            <label>Due Date
-              <input type="date" id="kf-due" />
+            <label>Start Date
+              <input type="date" id="kf-start" />
             </label>
+            <div class="kf-due-row">
+              <label class="kf-due-date">Due Date
+                <input type="date" id="kf-due" />
+              </label>
+              <label class="kf-due-time">Due Time
+                <input type="time" id="kf-due-time" />
+              </label>
+            </div>
             <label>Notes
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
               <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
@@ -151,6 +179,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
           id: user.id,
           displayName: user.displayName,
           isAdmin: user.roles.includes('admin'),
+          isStaff: user.roles.includes('admin') || user.roles.includes('staff'),
         })}
       </script>
       {/* Active-user directory for the assignee picker. Same safety story
@@ -181,6 +210,34 @@ const kanbanCss = `
   .kanban-status-pending { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4); }
   .kanban-status-err { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); }
 
+  /* Filter bar above the board. */
+  .kanban-filters {
+    display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+    margin: 16px 0 0 0; padding: 8px 0;
+  }
+  .kf-search {
+    flex: 1 1 280px; max-width: 480px;
+    padding: 8px 12px; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,0.4); background: transparent; color: inherit;
+    font: inherit;
+  }
+  .kf-filter-toggle {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid rgba(128,128,128,0.4);
+    font-size: 0.9em; user-select: none; margin: 0;
+  }
+  .kf-filter-toggle input { margin: 0; accent-color: #2563eb; }
+  .kf-filter-toggle:has(input:checked) {
+    background: rgba(37,99,235,0.15); border-color: rgba(37,99,235,0.5);
+  }
+  .kf-clear { padding: 6px 12px; font-size: 0.85em; }
+  .kf-count { margin-left: auto; opacity: 0.7; font-size: 0.85em; }
+
+  /* Hide non-matching cards during filtering without removing them from
+     the DOM — keeps SortableJS state and avoids flicker. */
+  .kanban-card.kf-hidden { display: none; }
+
   .kanban-board {
     display: grid;
     grid-template-columns: repeat(6, minmax(200px, 1fr));
@@ -202,7 +259,16 @@ const kanbanCss = `
     padding: 4px 6px 8px; border-bottom: 1px solid rgba(128,128,128,0.2);
     margin-bottom: 8px;
   }
-  .kanban-col-title { font-weight: 600; font-size: 0.95em; }
+  .kanban-col-title { font-weight: 600; font-size: 0.95em; flex: 1; }
+  .kanban-col-count {
+    font-size: 0.8em; opacity: 0.7; padding: 2px 6px; border-radius: 999px;
+    background: rgba(128,128,128,0.12); cursor: default;
+  }
+  .kanban-col-count.kanban-wip-exceeded {
+    background: rgba(220,38,38,0.2); color: #b91c1c; opacity: 1; font-weight: 600;
+  }
+  .kanban-col-count.kanban-wip-editable { cursor: pointer; }
+  .kanban-col-count.kanban-wip-editable:hover { background: rgba(128,128,128,0.25); }
   .kanban-add {
     background: transparent; border: 1px solid rgba(128,128,128,0.4);
     border-radius: 4px; width: 24px; height: 24px; cursor: pointer; color: inherit; font: inherit;
@@ -391,6 +457,11 @@ const kanbanCss = `
     opacity: 0.6; margin-top: 4px;
   }
 
+  /* Side-by-side due date + time inputs in the modal. */
+  .kf-due-row { display: flex; gap: 12px; margin-top: 12px; }
+  .kf-due-date { flex: 2; margin: 0; }
+  .kf-due-time { flex: 1; margin: 0; }
+
   /* Multi-select assignees control in the modal — same shape as groups. */
   .kf-assignees-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .kf-assignees-label { font-size: 0.9em; }
@@ -452,7 +523,9 @@ const kanbanClientJs = `
   var groupsAddBtn = document.getElementById('kf-groups-add');
   var groupsDatalist = document.getElementById('kf-groups-suggest');
   var assignedInput = document.getElementById('kf-assigned');
+  var startInput = document.getElementById('kf-start');
   var dueInput = document.getElementById('kf-due');
+  var dueTimeInput = document.getElementById('kf-due-time');
   var notesInput = document.getElementById('kf-notes');
   var errorEl = document.getElementById('kf-error');
   var cancelBtn = document.getElementById('kf-cancel');
@@ -485,6 +558,11 @@ const kanbanClientJs = `
       currentUser = JSON.parse(cuRaw.textContent) || currentUser;
     }
   } catch (_err) { /* keep default */ }
+
+  // Per-column config (label, position, wipLimit). Indexed by column key.
+  // Populated by snapshot/column_config_updated; defaults to empty so
+  // boards that pre-date the seed migration just show plain counts.
+  var columnConfig = new Map();
 
   // Active-user directory for the assignee picker.
   var knownUsers = [];
@@ -704,6 +782,117 @@ const kanbanClientJs = `
     return true;
   }
 
+  // ── Search / filter ─────────────────────────────────────────────────
+  // Pure client-side filtering over the in-memory cards map. Filters
+  // run against every card after each render or upsert; non-matching
+  // cards get a kf-hidden class (display: none) rather than being
+  // removed, so SortableJS state stays intact and re-applying filters
+  // is a fast classList toggle.
+  var filterState = { query: '', mine: false, overdue: false, hasDue: false };
+  var searchInputEl = document.getElementById('kf-search');
+  var mineToggleEl = document.getElementById('kf-mine');
+  var overdueToggleEl = document.getElementById('kf-overdue');
+  var hasDueToggleEl = document.getElementById('kf-has-due');
+  var clearBtnEl = document.getElementById('kf-clear');
+  var countEl = document.getElementById('kf-count');
+
+  function isFilterActive() {
+    return !!(filterState.query || filterState.mine || filterState.overdue || filterState.hasDue);
+  }
+
+  function todayIso() {
+    // Use the user's local date — we render due dates as YYYY-MM-DD without
+    // timezone, so "overdue" needs the local-day boundary, not UTC.
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
+
+  function cardMatches(card) {
+    if (filterState.query) {
+      var q = filterState.query.toLowerCase();
+      var hay = '';
+      hay += (card.title || '').toLowerCase() + ' ';
+      hay += (card.notes || '').toLowerCase() + ' ';
+      hay += (card.assigned || '').toLowerCase() + ' ';
+      if (Array.isArray(card.groups)) hay += card.groups.join(' ').toLowerCase() + ' ';
+      if (Array.isArray(card.assignees)) {
+        hay += card.assignees.map(function(a) {
+          return (a.displayName || '') + ' ' + (a.email || '');
+        }).join(' ').toLowerCase();
+      }
+      if (hay.indexOf(q) < 0) return false;
+    }
+    if (filterState.mine) {
+      var mine = false;
+      if (Array.isArray(card.assignees)) {
+        for (var i = 0; i < card.assignees.length; i++) {
+          if (card.assignees[i].userId === currentUser.id) { mine = true; break; }
+        }
+      }
+      if (!mine) return false;
+    }
+    if (filterState.hasDue && !card.dueDate) return false;
+    if (filterState.overdue) {
+      if (!card.dueDate) return false;
+      // Done-column cards aren't really overdue even if past their date.
+      if (card.column === 'done') return false;
+      if (card.dueDate >= todayIso()) return false;
+    }
+    return true;
+  }
+
+  function applyFilters() {
+    var visible = 0;
+    var total = 0;
+    cards.forEach(function(card) {
+      total++;
+      var node = document.querySelector('[data-card-id="' + card.id + '"]');
+      if (!node) return;
+      if (cardMatches(card)) {
+        node.classList.remove('kf-hidden');
+        visible++;
+      } else {
+        node.classList.add('kf-hidden');
+      }
+    });
+    if (isFilterActive()) {
+      countEl.textContent = visible + ' of ' + total + ' visible';
+      clearBtnEl.hidden = false;
+    } else {
+      countEl.textContent = '';
+      clearBtnEl.hidden = true;
+    }
+  }
+
+  function setFilter(partial) {
+    Object.assign(filterState, partial);
+    applyFilters();
+  }
+
+  searchInputEl.addEventListener('input', function() {
+    setFilter({ query: searchInputEl.value.trim() });
+  });
+  mineToggleEl.addEventListener('change', function() {
+    setFilter({ mine: !!mineToggleEl.checked });
+  });
+  overdueToggleEl.addEventListener('change', function() {
+    setFilter({ overdue: !!overdueToggleEl.checked });
+  });
+  hasDueToggleEl.addEventListener('change', function() {
+    setFilter({ hasDue: !!hasDueToggleEl.checked });
+  });
+  clearBtnEl.addEventListener('click', function() {
+    searchInputEl.value = '';
+    mineToggleEl.checked = false;
+    overdueToggleEl.checked = false;
+    hasDueToggleEl.checked = false;
+    setFilter({ query: '', mine: false, overdue: false, hasDue: false });
+    searchInputEl.focus();
+  });
+
   // ── Markdown renderer ────────────────────────────────────────────────
   // Intentionally small: supports headings (# / ## / ###…), bullet lists
   // (- / *), numbered lists (1.), inline **bold**, *italic*/_italic_,
@@ -860,7 +1049,64 @@ const kanbanClientJs = `
       if (!body) return;
       byCol[col].forEach(function(card) { body.appendChild(renderCardNode(card)); });
     });
+    // Re-apply filters whenever the DOM is rebuilt — newly-rendered nodes
+    // would otherwise show even if a filter is active.
+    applyFilters();
+    renderColumnHeaders();
   }
+
+  function countActiveCardsByColumn() {
+    var counts = {};
+    cards.forEach(function(c) {
+      counts[c.column] = (counts[c.column] || 0) + 1;
+    });
+    return counts;
+  }
+
+  function renderColumnHeaders() {
+    var counts = countActiveCardsByColumn();
+    var nodes = boardEl.querySelectorAll('[data-col-count]');
+    for (var i = 0; i < nodes.length; i++) {
+      var col = nodes[i].getAttribute('data-col-count');
+      var n = counts[col] || 0;
+      var cfg = columnConfig.get(col);
+      var limit = cfg && typeof cfg.wipLimit === 'number' ? cfg.wipLimit : null;
+      // Reset class + label each render — cheaper and simpler than tracking.
+      nodes[i].className = 'kanban-col-count';
+      if (limit !== null) {
+        nodes[i].textContent = n + ' / ' + limit;
+        if (n > limit) nodes[i].classList.add('kanban-wip-exceeded');
+      } else {
+        nodes[i].textContent = String(n);
+      }
+      nodes[i].title = limit !== null
+        ? 'WIP limit ' + limit + (currentUser.isStaff ? ' — click to change' : '')
+        : (currentUser.isStaff ? 'Click to set WIP limit' : '');
+      if (currentUser.isStaff) nodes[i].classList.add('kanban-wip-editable');
+    }
+  }
+
+  // Staff click on a column count → prompt for new WIP limit. Empty/0
+  // clears the limit. UX is intentionally minimal for v1.
+  boardEl.addEventListener('click', function(e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('.kanban-col-count.kanban-wip-editable')) return;
+    if (!currentUser.isStaff) return;
+    var col = t.getAttribute('data-col-count');
+    var current = columnConfig.get(col);
+    var prev = current && current.wipLimit ? String(current.wipLimit) : '';
+    var entered = prompt('WIP limit for this column? (blank to clear)', prev);
+    if (entered === null) return;
+    var trimmed = entered.trim();
+    var newLimit = trimmed === '' ? null : Math.floor(Number(trimmed));
+    if (newLimit !== null && (!Number.isFinite(newLimit) || newLimit < 1)) {
+      showToast('WIP limit must be a positive integer or blank.', 4000);
+      return;
+    }
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'set_wip_limit', column: col });
+    send({ type: 'set_wip_limit', clientMsgId: cmid, column: col, wipLimit: newLimit });
+  });
 
   // Patch a single card's node in place (or add it if new).
   function upsertCard(card) {
@@ -883,6 +1129,7 @@ const kanbanClientJs = `
       }
     }
     if (!inserted) body.appendChild(node);
+    applyFilters();
   }
 
   function removeCardNode(id) {
@@ -919,7 +1166,12 @@ const kanbanClientJs = `
       });
     }
     if (card.assigned) meta.appendChild(chip('@ ' + card.assigned));
-    if (card.dueDate) meta.appendChild(chip('Due ' + card.dueDate));
+    if (card.startDate) meta.appendChild(chip('Start ' + card.startDate));
+    if (card.dueDate) {
+      var dueLabel = 'Due ' + card.dueDate;
+      if (card.dueTime) dueLabel += ' ' + card.dueTime;
+      meta.appendChild(chip(dueLabel));
+    }
     if (meta.childNodes.length > 0) el.appendChild(meta);
 
     if (card.notes) {
@@ -1222,7 +1474,9 @@ const kanbanClientJs = `
     renderSelectedAssignees();
     assigneesInputEl.value = '';
     assignedInput.value = '';
+    startInput.value = '';
     dueInput.value = '';
+    dueTimeInput.value = '';
     notesInput.value = '';
     errorEl.hidden = true;
     archiveBtn.hidden = true;
@@ -1255,7 +1509,9 @@ const kanbanClientJs = `
     renderSelectedAssignees();
     assigneesInputEl.value = '';
     assignedInput.value = card.assigned || '';
+    startInput.value = card.startDate || '';
     dueInput.value = card.dueDate || '';
+    dueTimeInput.value = card.dueTime || '';
     notesInput.value = card.notes || '';
     errorEl.hidden = true;
     // Archive and Restore are mutually exclusive: Archive only appears for
@@ -1312,7 +1568,9 @@ const kanbanClientJs = `
         assigneeUserIds: assigneeIds,
         assigned: assignedInput.value.trim() || null,
         notes: notesInput.value.trim() || null,
+        startDate: startInput.value || null,
         dueDate: dueInput.value || null,
+        dueTime: dueTimeInput.value || null,
       });
       if (!ok) showFormError('Disconnected — try again when reconnected.');
     } else {
@@ -1332,7 +1590,9 @@ const kanbanClientJs = `
           assigneeUserIds: assigneeIds,
           assigned: assignedInput.value.trim() || null,
           notes: notesInput.value.trim() || null,
+          startDate: startInput.value || null,
           dueDate: dueInput.value || null,
+          dueTime: dueTimeInput.value || null,
         },
       });
       if (!ok2) showFormError('Disconnected — try again when reconnected.');
@@ -1487,6 +1747,12 @@ const kanbanClientJs = `
       case 'snapshot':
         cards.clear();
         msg.cards.forEach(function(c) { cards.set(c.id, c); });
+        // Replace column config wholesale so a board with WIP limits set
+        // shows them as soon as the snapshot lands.
+        columnConfig.clear();
+        if (Array.isArray(msg.columns)) {
+          msg.columns.forEach(function(c) { columnConfig.set(c.columnName, c); });
+        }
         renderAll();
         // Deep-link from a notification: /kanban/<slug>?card=<id> auto-opens
         // that card's modal as soon as the snapshot lands. One-shot — strip
@@ -1619,6 +1885,13 @@ const kanbanClientJs = `
         if (commentsByCardId !== msg.cardId) return;
         commentList = commentList.filter(function(c) { return c.id !== msg.id; });
         renderCommentsList();
+        return;
+      case 'column_config_updated':
+        // Single column's config changed (e.g., WIP limit set/cleared).
+        if (msg.column && msg.column.columnName) {
+          columnConfig.set(msg.column.columnName, msg.column);
+          renderColumnHeaders();
+        }
         return;
       case 'ack':
         pendingClientMsgs.delete(msg.clientMsgId);

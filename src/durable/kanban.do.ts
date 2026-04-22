@@ -28,11 +28,13 @@ import {
   getComment,
   listActiveUserDirectory,
   listArchivedCards,
+  listBoardColumns,
   listCardEvents,
   listCards,
   listComments,
   logCardEvent,
   moveCard,
+  setColumnWipLimit,
   unarchiveCard,
   updateCard,
   updateComment,
@@ -68,6 +70,22 @@ const dueDateSchema = z
   .nullable()
   .optional();
 
+// Same shape as dueDateSchema but kept separate to allow future divergence
+// (e.g. start dates may eventually allow ranges or relative offsets).
+const startDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .nullable()
+  .optional();
+
+// HH:MM in 24h format, 00:00–23:59. Loose on minute edges (any 0–9 ten's
+// digit) — exact range bounds aren't worth the regex complexity here.
+const dueTimeSchema = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+  .nullable()
+  .optional();
+
 const clientMsgSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('hello'),
@@ -82,7 +100,9 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     assigneeUserIds: z.array(z.number().int().positive()).max(10).optional(),
     assigned: nullableStr(MAX_FIELD),
     notes: nullableStr(MAX_NOTES),
+    startDate: startDateSchema,
     dueDate: dueDateSchema,
+    dueTime: dueTimeSchema,
   }),
   z.object({
     type: z.literal('update_card'),
@@ -95,7 +115,9 @@ const clientMsgSchema = z.discriminatedUnion('type', [
       assigneeUserIds: z.array(z.number().int().positive()).max(10).optional(),
       assigned: nullableStr(MAX_FIELD),
       notes: nullableStr(MAX_NOTES),
+      startDate: startDateSchema,
       dueDate: dueDateSchema,
+      dueTime: dueTimeSchema,
     }),
   }),
   z.object({
@@ -161,6 +183,13 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     id: z.number().int().positive(),
   }),
+  z.object({
+    // Staff+ can set a per-column WIP limit. null = clear the limit.
+    type: z.literal('set_wip_limit'),
+    clientMsgId: z.string().max(64),
+    column: columnEnum,
+    wipLimit: z.number().int().min(1).max(999).nullable(),
+  }),
 ]);
 
 type ClientMsg = z.infer<typeof clientMsgSchema>;
@@ -174,6 +203,10 @@ interface SocketAttachment {
   // don't need a DB hit per message. The route reads roles from the
   // session-resolved AuthUser and forwards via X-User-Is-Admin header.
   isAdmin: boolean;
+  // Whether the user holds the 'staff' role (or higher). Used by the
+  // WIP-limit setter and other board-config mutations. Admin implies
+  // staff at the route layer — so this is true if either role is held.
+  isStaff: boolean;
   // Which board this socket is connected to. Each DO instance is per-board
   // (idFromName('board-' + id)), but we also store it on the attachment so
   // service calls can pass it explicitly rather than relying on DO-internal
@@ -199,6 +232,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
     const displayName = request.headers.get('X-User-Display-Name');
     const boardIdRaw = request.headers.get('X-Board-Id');
     const isAdminRaw = request.headers.get('X-User-Is-Admin');
+    const isStaffRaw = request.headers.get('X-User-Is-Staff');
     const userId = userIdRaw ? Number.parseInt(userIdRaw, 10) : NaN;
     const boardId = boardIdRaw ? Number.parseInt(boardIdRaw, 10) : NaN;
     if (!Number.isFinite(userId) || userId <= 0 || !email) {
@@ -220,15 +254,19 @@ export class KanbanBoardDO extends DurableObject<Env> {
       email,
       displayName: displayName || null,
       isAdmin: isAdminRaw === '1',
+      isStaff: isStaffRaw === '1' || isAdminRaw === '1',
       boardId,
       recentMs: [],
     };
     server.serializeAttachment(attachment);
 
     // Send initial snapshot for this board. If this throws, the socket will close.
-    const cards = await listCards(this.env.DB, boardId);
+    const [cards, columns] = await Promise.all([
+      listCards(this.env.DB, boardId),
+      listBoardColumns(this.env.DB, boardId),
+    ]);
     server.send(
-      JSON.stringify({ type: 'snapshot', cards: cards.map(cardToDto) })
+      JSON.stringify({ type: 'snapshot', cards: cards.map(cardToDto), columns })
     );
 
     return new Response(null, { status: 101, webSocket: client });
@@ -264,8 +302,11 @@ export class KanbanBoardDO extends DurableObject<Env> {
     try {
       switch (parsed.type) {
         case 'hello': {
-          const cards = await listCards(this.env.DB, attachment.boardId);
-          this.sendTo(ws, { type: 'snapshot', cards });
+          const [cards, columns] = await Promise.all([
+            listCards(this.env.DB, attachment.boardId),
+            listBoardColumns(this.env.DB, attachment.boardId),
+          ]);
+          this.sendTo(ws, { type: 'snapshot', cards, columns });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -280,7 +321,9 @@ export class KanbanBoardDO extends DurableObject<Env> {
               assigneeUserIds: parsed.assigneeUserIds,
               assigned: parsed.assigned ?? null,
               notes: parsed.notes ?? null,
+              startDate: parsed.startDate ?? null,
               dueDate: parsed.dueDate ?? null,
+              dueTime: parsed.dueTime ?? null,
             },
             attachment.userId
           );
@@ -542,6 +585,33 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'comment_updated', comment: updated });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'set_wip_limit': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'forbidden',
+            });
+            return;
+          }
+          const config = await setColumnWipLimit(
+            this.env.DB,
+            attachment.boardId,
+            parsed.column,
+            parsed.wipLimit
+          );
+          if (!config) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'not_found',
+            });
+            return;
+          }
+          this.broadcast({ type: 'column_config_updated', column: config });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

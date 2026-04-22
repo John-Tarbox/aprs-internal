@@ -125,6 +125,27 @@ export async function createBoard(
     .bind(name, slug, userId)
     .first<RawBoardRow>();
   if (!row) throw new Error('Failed to insert board');
+
+  // Seed the canonical 6-column config so the UI has WIP-limit slots to
+  // render against. The column list mirrors KANBAN_COLUMNS above.
+  await db.batch(
+    [
+      ['not_started', 'Not Started', 0],
+      ['started', 'Started', 1],
+      ['blocked', 'Blocked', 2],
+      ['ready', 'Ready', 3],
+      ['approval', 'Approval', 4],
+      ['done', 'Done', 5],
+    ].map(([name, label, pos]) =>
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO kanban_board_columns
+             (board_id, column_name, label, position) VALUES (?, ?, ?, ?)`
+        )
+        .bind(row.id, name, label, pos)
+    )
+  );
+
   return hydrateBoard(row);
 }
 
@@ -175,7 +196,11 @@ export interface CardDto {
   /** Legacy free-text assigned field (pre-S5). Retained alongside assignees. */
   assigned: string | null;
   notes: string | null;
+  /** YYYY-MM-DD or null. Paired with dueDate to enable Timeline view. */
+  startDate: string | null;
   dueDate: string | null;
+  /** HH:MM (24h) or null. When set, due_date carries an explicit time. */
+  dueTime: string | null;
   /** ISO timestamp when the card was archived (soft-deleted); null when active. */
   archivedAt: string | null;
   version: number;
@@ -193,7 +218,9 @@ interface RawCardRow {
   title: string;
   assigned: string | null;
   notes: string | null;
+  start_date: string | null;
   due_date: string | null;
+  due_time: string | null;
   archived_at: string | null;
   version: number;
   created_by_user_id: number | null;
@@ -217,7 +244,9 @@ function hydrateCard(
     assignees,
     assigned: row.assigned,
     notes: row.notes,
+    startDate: row.start_date,
     dueDate: row.due_date,
+    dueTime: row.due_time,
     archivedAt: row.archived_at,
     version: row.version,
     createdByUserId: row.created_by_user_id,
@@ -335,6 +364,67 @@ async function setCardAssignees(
  * the picker only needs id, display name, and email. Sorted display-name
  * first so the dropdown reads naturally.
  */
+// ── Board column config (S9 — WIP limits; S12 will extend) ─────────────
+
+export interface BoardColumnConfigDto {
+  columnName: ColumnName;
+  label: string;
+  position: number;
+  /** Null = no limit. UI shows "(N/limit)" badge when set, red when N > limit. */
+  wipLimit: number | null;
+}
+
+export async function listBoardColumns(
+  db: D1Database,
+  boardId: number
+): Promise<BoardColumnConfigDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT column_name, label, position, wip_limit
+       FROM kanban_board_columns
+       WHERE board_id = ?
+       ORDER BY position ASC`
+    )
+    .bind(boardId)
+    .all<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null }>();
+  return (res.results ?? []).map((r) => ({
+    columnName: r.column_name,
+    label: r.label,
+    position: r.position,
+    wipLimit: r.wip_limit,
+  }));
+}
+
+/**
+ * Set (or clear) a column's WIP limit. Idempotent. Returns the updated
+ * config row, or null if the (board, column) pair doesn't exist (likely
+ * a board that pre-dates the seed and is missing rows).
+ */
+export async function setColumnWipLimit(
+  db: D1Database,
+  boardId: number,
+  columnName: ColumnName,
+  wipLimit: number | null
+): Promise<BoardColumnConfigDto | null> {
+  const limit = wipLimit !== null && wipLimit > 0 ? Math.floor(wipLimit) : null;
+  const row = await db
+    .prepare(
+      `UPDATE kanban_board_columns
+       SET wip_limit = ?
+       WHERE board_id = ? AND column_name = ?
+       RETURNING column_name, label, position, wip_limit`
+    )
+    .bind(limit, boardId, columnName)
+    .first<{ column_name: ColumnName; label: string; position: number; wip_limit: number | null }>();
+  if (!row) return null;
+  return {
+    columnName: row.column_name,
+    label: row.label,
+    position: row.position,
+    wipLimit: row.wip_limit,
+  };
+}
+
 export async function listActiveUserDirectory(
   db: D1Database
 ): Promise<AssigneeDto[]> {
@@ -475,7 +565,9 @@ export interface CreateCardInput {
   assigneeUserIds?: number[];
   assigned?: string | null;
   notes?: string | null;
+  startDate?: string | null;
   dueDate?: string | null;
+  dueTime?: string | null;
 }
 
 export async function createCard(
@@ -491,14 +583,15 @@ export async function createCard(
   const row = await db
     .prepare(
       `INSERT INTO kanban_cards
-         (board_id, column_name, position, title, assigned, notes, due_date,
+         (board_id, column_name, position, title, assigned, notes,
+          start_date, due_date, due_time,
           created_by_user_id, updated_by_user_id)
        VALUES (
          ?,
          ?,
          (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
            WHERE board_id = ? AND column_name = ? AND archived_at IS NULL),
-         ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?
        )
        RETURNING *`
     )
@@ -510,7 +603,9 @@ export async function createCard(
       input.title,
       input.assigned ?? null,
       input.notes ?? null,
+      input.startDate ?? null,
       input.dueDate ?? null,
+      input.dueTime ?? null,
       userId,
       userId
     )
@@ -543,7 +638,9 @@ export interface UpdateCardPatch {
   assigneeUserIds?: number[];
   assigned?: string | null;
   notes?: string | null;
+  startDate?: string | null;
   dueDate?: string | null;
+  dueTime?: string | null;
 }
 
 /** Returns the updated card, or null on version conflict / not found. */
@@ -572,6 +669,14 @@ export async function updateCard(
   if (patch.dueDate !== undefined) {
     sets.push('due_date = ?');
     binds.push(patch.dueDate ?? null);
+  }
+  if (patch.startDate !== undefined) {
+    sets.push('start_date = ?');
+    binds.push(patch.startDate ?? null);
+  }
+  if (patch.dueTime !== undefined) {
+    sets.push('due_time = ?');
+    binds.push(patch.dueTime ?? null);
   }
 
   const normalizedGroups =
