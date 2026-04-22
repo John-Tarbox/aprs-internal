@@ -52,6 +52,13 @@ import {
 } from '../services/kanban.service';
 import { normalizeHexColor } from '../util/colors';
 import {
+  createCardFromTemplate,
+  createTemplate,
+  deleteTemplate,
+  listTemplatesForBoard,
+} from '../services/card_templates.service';
+import type { CardTemplatePayload } from '../services/card_templates.service';
+import {
   createNotification,
   parseMentions,
 } from '../services/notifications.service';
@@ -271,6 +278,33 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     name: z.string().min(1).max(MAX_FIELD),
     color: colorSchema,
+  }),
+  z.object({
+    type: z.literal('list_templates'),
+    clientMsgId: z.string().max(64),
+  }),
+  z.object({
+    // Save a snapshot of an existing card as a named template, or save
+    // a freshly-composed payload (omit cardId for the latter).
+    type: z.literal('save_template'),
+    clientMsgId: z.string().max(64),
+    name: z.string().min(1).max(100),
+    /** JSON-shaped payload. Validated for top-level type only here;
+     *  the service is forgiving about unknown / extra keys. */
+    payload: z.record(z.string(), z.unknown()),
+  }),
+  z.object({
+    type: z.literal('create_from_template'),
+    clientMsgId: z.string().max(64),
+    templateId: z.number().int().positive(),
+    column: columnEnum,
+    /** Optional title override at create-time; defaults to template's. */
+    titleOverride: z.string().max(MAX_TITLE).optional(),
+  }),
+  z.object({
+    type: z.literal('delete_template'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
   }),
 ]);
 
@@ -792,6 +826,74 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'column_removed', column: parsed.column });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'list_templates': {
+          const templates = await listTemplatesForBoard(this.env.DB, attachment.boardId);
+          this.sendTo(ws, { type: 'templates_snapshot', templates });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'save_template': {
+          const payload = parsed.payload as CardTemplatePayload;
+          // Normalize cover color server-side, same as direct card edits,
+          // so a snapshot from an old client gets the canonical form.
+          if (payload.coverColor) {
+            payload.coverColor = normalizeHexColor(payload.coverColor) ?? null;
+          }
+          const tpl = await createTemplate(
+            this.env.DB,
+            attachment.boardId,
+            attachment.userId,
+            { name: parsed.name, payload }
+          );
+          if (!tpl) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({ type: 'template_created', template: tpl });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'create_from_template': {
+          // Re-fetch templates rather than caching — a delete from
+          // another client could otherwise materialize a tombstoned one.
+          const templates = await listTemplatesForBoard(this.env.DB, attachment.boardId);
+          const tpl = templates.find((t) => t.id === parsed.templateId);
+          if (!tpl) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
+            return;
+          }
+          const card = await createCardFromTemplate(
+            this.env.DB,
+            attachment.boardId,
+            tpl,
+            parsed.column,
+            attachment.userId,
+            parsed.titleOverride
+          );
+          this.broadcast({ type: 'card_created', card });
+          await this.emitCardEvent(card.id, attachment.userId, 'card.created', {
+            column: card.column,
+            position: card.position,
+            fromTemplate: tpl.name,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'delete_template': {
+          const ok = await deleteTemplate(
+            this.env.DB,
+            parsed.id,
+            attachment.userId,
+            attachment.isAdmin
+          );
+          if (!ok) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          this.broadcast({ type: 'template_deleted', id: parsed.id });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

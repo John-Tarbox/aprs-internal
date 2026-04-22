@@ -55,6 +55,14 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         <a class="kanban-back" href="/kanban" aria-label="Back to board list">← All boards</a>
         <h1>{board.name}</h1>
         <span id="kanban-status" class="kanban-status kanban-status-pending">Connecting…</span>
+        <button id="kanban-templates-btn" class="btn" type="button" title="Card templates">
+          Templates
+        </button>
+        {isStaff ? (
+          <a class="btn" href={`/kanban/${encodeURIComponent(board.slug)}/import`} title="Bulk import from CSV">
+            Import CSV
+          </a>
+        ) : null}
         <button id="kanban-archive-toggle" class="btn kanban-archive-toggle" type="button" aria-expanded="false">
           Show archived
         </button>
@@ -223,11 +231,23 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
             <p id="kf-error" class="kanban-error" hidden></p>
             <div class="kanban-modal-actions">
               <button type="button" id="kf-cancel" class="btn">Cancel</button>
+              <button type="button" id="kf-save-template" class="btn" hidden title="Save this card as a reusable template">Save as template</button>
               <button type="button" id="kf-archive" class="btn kanban-btn-danger" hidden>Archive</button>
               <button type="button" id="kf-restore" class="btn" hidden>Restore</button>
               <button type="submit" id="kf-save" class="btn btn-primary">Save</button>
             </div>
           </form>
+        </div>
+      </div>
+
+      <div id="kanban-templates-modal" class="kanban-modal" hidden role="dialog" aria-label="Card templates">
+        <div class="kanban-modal-inner">
+          <h2>Card templates</h2>
+          <p class="muted" id="kt-empty" hidden>No templates yet on this board. Open a card and click "Save as template" to create one.</p>
+          <ul id="kt-list" class="kt-list"></ul>
+          <div class="kanban-modal-actions">
+            <button type="button" id="kt-close" class="btn">Close</button>
+          </div>
         </div>
       </div>
 
@@ -276,6 +296,33 @@ const kanbanCss = `
   .kanban-status-ok { background: rgba(34,197,94,0.15); color: inherit; border: 1px solid rgba(34,197,94,0.4); }
   .kanban-status-pending { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4); }
   .kanban-status-err { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); }
+
+  /* Card templates modal list (P5). */
+  .kt-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 6px;
+    max-height: 320px; overflow-y: auto;
+  }
+  .kt-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border: 1px solid rgba(128,128,128,0.25);
+    border-radius: 6px;
+  }
+  .kt-item-name { font-weight: 500; flex: 1; }
+  .kt-item-meta { font-size: 0.8em; opacity: 0.6; }
+  .kt-item-col {
+    font: inherit; padding: 4px 6px;
+    border: 1px solid rgba(128,128,128,0.4); border-radius: 4px;
+    background: transparent; color: inherit;
+  }
+  .kt-item-create { padding: 4px 10px; font-size: 0.85em; }
+  .kt-item-del {
+    background: none; border: none; color: inherit; cursor: pointer;
+    font-size: 1em; opacity: 0.4; padding: 0 4px;
+  }
+  .kt-item:hover .kt-item-del,
+  .kt-item:focus-within .kt-item-del { opacity: 0.8; }
+  .kt-item-del:hover { color: #b91c1c; opacity: 1; }
 
   /* Saved-filter chips row above the filter bar (P4). */
   .kanban-saved-filters {
@@ -1374,6 +1421,151 @@ const kanbanClientJs = `
 
   refreshSavedFilters();
 
+  // ── Card templates (P5) ─────────────────────────────────────────────
+  // List populated via list_templates WS; modified via templates_*
+  // broadcasts. The Templates button in the head opens a modal showing
+  // every template on this board with a per-row "Create in <column>"
+  // dropdown + button. The card modal gains a "Save as template" button
+  // that snapshots the currently-edited card's fields.
+  var templates = [];
+  var templatesBtn = document.getElementById('kanban-templates-btn');
+  var templatesModalEl = document.getElementById('kanban-templates-modal');
+  var templatesListEl = document.getElementById('kt-list');
+  var templatesEmptyEl = document.getElementById('kt-empty');
+  var templatesCloseBtn = document.getElementById('kt-close');
+  var saveTemplateBtn = document.getElementById('kf-save-template');
+
+  function renderTemplatesList() {
+    while (templatesListEl.firstChild) templatesListEl.removeChild(templatesListEl.firstChild);
+    if (templates.length === 0) {
+      templatesEmptyEl.hidden = false;
+      return;
+    }
+    templatesEmptyEl.hidden = true;
+    var sorted = templates.slice().sort(function(a, b) {
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    sorted.forEach(function(t) {
+      var li = document.createElement('li');
+      li.className = 'kt-item';
+      var n = document.createElement('span');
+      n.className = 'kt-item-name';
+      n.textContent = t.name;
+      li.appendChild(n);
+      // Per-row column picker — defaults to the first column.
+      var sel = document.createElement('select');
+      sel.className = 'kt-item-col';
+      var ordered = Array.from(columnConfig.values()).sort(function(a, b) {
+        return a.position - b.position;
+      });
+      if (ordered.length === 0) {
+        // Fall back to whatever data-col attributes exist on the board.
+        boardEl.querySelectorAll('[data-col]').forEach(function(s) {
+          var key = s.getAttribute('data-col');
+          if (!key) return;
+          var opt = document.createElement('option');
+          opt.value = key;
+          opt.textContent = key;
+          sel.appendChild(opt);
+        });
+      } else {
+        ordered.forEach(function(col) {
+          var opt = document.createElement('option');
+          opt.value = col.columnName;
+          opt.textContent = col.label;
+          sel.appendChild(opt);
+        });
+      }
+      li.appendChild(sel);
+      var go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'btn btn-primary kt-item-create';
+      go.textContent = 'Create';
+      go.addEventListener('click', function() {
+        go.disabled = true;
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'create_from_template', templateId: t.id });
+        send({
+          type: 'create_from_template',
+          clientMsgId: cmid,
+          templateId: t.id,
+          column: sel.value,
+        });
+        // Close the modal optimistically — the new card_created broadcast
+        // will appear on the board behind it.
+        templatesModalEl.hidden = true;
+      });
+      li.appendChild(go);
+      // Author or admin can delete.
+      if ((t.createdByUserId !== null && t.createdByUserId === currentUser.id) || currentUser.isAdmin) {
+        var del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'kt-item-del';
+        del.setAttribute('aria-label', 'Delete template ' + t.name);
+        del.textContent = '×';
+        del.addEventListener('click', function() {
+          if (!confirm('Delete template "' + t.name + '"?')) return;
+          var cmid = nextClientMsgId();
+          pendingClientMsgs.set(cmid, { type: 'delete_template', id: t.id });
+          send({ type: 'delete_template', clientMsgId: cmid, id: t.id });
+        });
+        li.appendChild(del);
+      }
+      templatesListEl.appendChild(li);
+    });
+  }
+
+  function refreshTemplates() {
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_templates' });
+    send({ type: 'list_templates', clientMsgId: cmid });
+  }
+
+  templatesBtn.addEventListener('click', function() {
+    refreshTemplates();
+    templatesModalEl.hidden = false;
+  });
+  templatesCloseBtn.addEventListener('click', function() {
+    templatesModalEl.hidden = true;
+  });
+  templatesModalEl.addEventListener('click', function(e) {
+    if (e.target === templatesModalEl) templatesModalEl.hidden = true;
+  });
+
+  saveTemplateBtn.addEventListener('click', function() {
+    if (editingCardId === null) return;
+    var card = editingArchived ? archivedCards.get(editingCardId) : cards.get(editingCardId);
+    if (!card) return;
+    var name = prompt('Template name?', card.title || '');
+    if (name === null) return;
+    name = name.trim();
+    if (!name) return;
+    // Snapshot the user-editable fields — same shape the create handler
+    // accepts. Dates are absolute here (no offsets) to keep v1 simple;
+    // future "rolling templates" can store offsets.
+    var payload = {
+      title: card.title,
+      notes: card.notes,
+      groups: groupNamesOf(card),
+      assigneeUserIds: Array.isArray(card.assignees)
+        ? card.assignees.map(function(a) { return a.userId; })
+        : [],
+      coverColor: card.coverColor || null,
+      // Dates intentionally omitted — usually templates are date-relative;
+      // no UX yet to enter offsets, so don't carry literal dates that
+      // would be wrong when applied later.
+    };
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'save_template', name: name });
+    send({
+      type: 'save_template',
+      clientMsgId: cmid,
+      name: name,
+      payload: payload,
+    });
+    showToast('Template saved as "' + name + '".', 3000);
+  });
+
   searchInputEl.addEventListener('input', function() {
     setFilter({ query: searchInputEl.value.trim() });
   });
@@ -2411,6 +2603,7 @@ const kanbanClientJs = `
     errorEl.hidden = true;
     archiveBtn.hidden = true;
     restoreBtn.hidden = true;
+    saveTemplateBtn.hidden = true;
     // No card id yet → no activity timeline or comments to show.
     activitySectionEl.hidden = true;
     activityEvents = [];
@@ -2468,6 +2661,8 @@ const kanbanClientJs = `
     // active cards; Restore only appears for archived ones.
     archiveBtn.hidden = editingArchived;
     restoreBtn.hidden = !editingArchived;
+    // Templates can be saved from any active card (not from archived).
+    saveTemplateBtn.hidden = editingArchived;
     // Reveal attachments + checklist + comments + activity timeline and
     // kick off fetches for this card. All four render empty while in
     // flight.
@@ -2925,6 +3120,28 @@ const kanbanClientJs = `
           // list if it's currently open.
           renderAll();
           if (!modalEl.hidden) renderSelectedGroups();
+        }
+        return;
+      case 'templates_snapshot':
+        templates = (msg.templates || []).slice();
+        if (!templatesModalEl.hidden) renderTemplatesList();
+        return;
+      case 'template_created':
+        if (msg.template) {
+          // Replace if present (idempotent); append otherwise.
+          var foundIdx = -1;
+          for (var ti = 0; ti < templates.length; ti++) {
+            if (templates[ti].id === msg.template.id) { foundIdx = ti; break; }
+          }
+          if (foundIdx >= 0) templates[foundIdx] = msg.template;
+          else templates.push(msg.template);
+          if (!templatesModalEl.hidden) renderTemplatesList();
+        }
+        return;
+      case 'template_deleted':
+        if (typeof msg.id === 'number') {
+          templates = templates.filter(function(t) { return t.id !== msg.id; });
+          if (!templatesModalEl.hidden) renderTemplatesList();
         }
         return;
       case 'ack':

@@ -19,6 +19,11 @@ export const AdminUsersPage: FC<AdminUsersPageProps> = ({ user, users, flash }) 
         Okta users are auto-created on first sign-in with the <code>viewer</code> role. Add Google users here
         to put them on the allow-list.
       </p>
+      <p>
+        <a class="btn" href="/admin/export.zip" title="Download a ZIP of every board's data as JSON">
+          ↓ Data export (ZIP)
+        </a>
+      </p>
 
       {flash ? <div class={`flash flash-${flash.kind}`}>{flash.message}</div> : null}
 

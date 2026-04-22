@@ -19,7 +19,9 @@ export type AuditAction =
   | 'user.invited'
   | 'user.deactivated'
   | 'user.reactivated'
-  | 'user.roles_changed';
+  | 'user.roles_changed'
+  | 'admin.export'
+  | 'bulk.import';
 
 export interface WriteAuditInput {
   userId?: number | null;

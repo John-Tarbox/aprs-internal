@@ -22,6 +22,8 @@ import type { AppEnv } from '../env';
 import { requireRole } from '../middleware/auth';
 import { KanbanPage } from '../pages/KanbanPage';
 import { KanbanBoardListPage } from '../pages/KanbanBoardListPage';
+import { BulkImportPage } from '../pages/BulkImportPage';
+import { commitImport, parseImportCsv } from '../services/bulk_import.service';
 import {
   listBoards,
   getBoardBySlug,
@@ -38,6 +40,7 @@ import {
   listDistinctGroupNames,
 } from '../services/kanban.service';
 import { markNotificationsRead } from '../services/notifications.service';
+import { writeAudit } from '../services/audit.service';
 
 /** Hard cap for a single attachment upload. R2 itself can take much
  *  larger objects but we proxy through the Worker which has request-body
@@ -294,6 +297,100 @@ kanbanRoutes.get('/:slug/ws', async (c) => {
   });
 
   return stub.fetch(forwarded);
+});
+
+// ── Bulk CSV import (P7 — staff-only) ───────────────────────────────────
+
+kanbanRoutes.get('/:slug/import', requireRole('staff'), async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  const columns = await listBoardColumns(c.env.DB, board.id);
+  const flashKind = c.req.query('ok') ? 'ok' : c.req.query('err') ? 'err' : undefined;
+  const flashMsg = c.req.query('ok') ?? c.req.query('err') ?? undefined;
+  return c.html(
+    <BulkImportPage
+      user={user}
+      board={board}
+      columns={columns}
+      flash={flashKind && flashMsg ? { kind: flashKind, message: flashMsg } : undefined}
+    />
+  );
+});
+
+kanbanRoutes.post('/:slug/import', requireRole('staff'), async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+
+  const form = await c.req.formData();
+  const column = String(form.get('column') ?? '').trim();
+  const file = form.get('file');
+  if (!file || typeof file !== 'object' || typeof (file as Blob).size !== 'number') {
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('No file uploaded.')}`,
+      302
+    );
+  }
+  const blob = file as unknown as Blob;
+  if (blob.size <= 0) {
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('File is empty.')}`,
+      302
+    );
+  }
+  if (blob.size > 2 * 1024 * 1024) {
+    // 2 MiB cap — more than enough for MAX_IMPORT_ROWS rows. Larger
+    // uploads are almost certainly not what the user intended.
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('File too large (max 2 MB).')}`,
+      302
+    );
+  }
+  if (!column) {
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('Pick a target column.')}`,
+      302
+    );
+  }
+
+  const text = await blob.text();
+  const { rows, warnings, totalRaw } = parseImportCsv(text);
+  if (rows.length === 0) {
+    const msg = warnings[0] || 'No importable rows.';
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent(msg)}`,
+      302
+    );
+  }
+
+  try {
+    const result = await commitImport(c.env.DB, board.id, column, rows, user.id);
+    await writeAudit(c.env.DB, {
+      userId: user.id,
+      action: 'bulk.import',
+      metadata: {
+        boardId: board.id,
+        column,
+        created: result.created.length,
+        skippedEmpty: totalRaw - rows.length,
+        warnings,
+      },
+    });
+    const okMsg = `Imported ${result.created.length} cards into ${column}.${warnings.length ? ' ' + warnings.join(' ') : ''}`;
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}?ok=${encodeURIComponent(okMsg)}`,
+      302
+    );
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    return c.redirect(
+      `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('Import failed: ' + msg)}`,
+      302
+    );
+  }
 });
 
 // ── Board mutations ─────────────────────────────────────────────────────
