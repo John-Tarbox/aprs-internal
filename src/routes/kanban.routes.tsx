@@ -1,36 +1,115 @@
 /**
- * Kanban routes.
- *   GET /kanban       — server-rendered board page
- *   GET /kanban/ws    — WebSocket upgrade forwarded to KanbanBoardDO
+ * Kanban routes. Multi-board:
+ *   GET  /kanban                 — board picker (list + create form)
+ *   POST /kanban                 — create board           (staff+)
+ *   GET  /kanban/:slug           — board page
+ *   GET  /kanban/:slug/ws        — WebSocket upgrade to KanbanBoardDO for this board
+ *   POST /kanban/:slug/rename    — rename board           (staff+)
+ *   POST /kanban/:slug/delete    — delete board           (staff+)
  *
  * Auth is enforced via the app-level `authMiddleware` in src/index.ts, so
- * `c.get('user')` is guaranteed present.
+ * `c.get('user')` is guaranteed present. Mutation endpoints additionally
+ * gate on requireRole('staff').
  *
- * For the WS upgrade we build a fresh Request with the authenticated
- * identity in internal headers (X-User-*). Any X-User-* headers on the
+ * For the WS upgrade we build a fresh Request carrying trusted internal
+ * headers (X-User-*, X-Board-Id). Any X-User-* / X-Board-Id headers on the
  * inbound client request are dropped — only the authoritative server-side
- * values reach the DO. This prevents header smuggling by a malicious
- * authenticated user who might try to impersonate another user id.
+ * values reach the DO.
  */
 
 import { Hono } from 'hono';
 import type { AppEnv } from '../env';
+import { requireRole } from '../middleware/auth';
 import { KanbanPage } from '../pages/KanbanPage';
+import { KanbanBoardListPage } from '../pages/KanbanBoardListPage';
+import {
+  listBoards,
+  getBoardBySlug,
+  createBoard,
+  renameBoard,
+  deleteBoard,
+  getColumnCounts,
+} from '../services/kanban.service';
+import { KANBAN_COLUMNS } from '../services/kanban.service';
 
 export const kanbanRoutes = new Hono<AppEnv>();
 
-kanbanRoutes.get('/', (c) => {
+// ── Board picker ────────────────────────────────────────────────────────
+
+kanbanRoutes.get('/', async (c) => {
   const user = c.get('user');
-  return c.html(<KanbanPage user={user} />);
+  const boards = await listBoards(c.env.DB);
+  // Per-board counts, computed in parallel.
+  const countsByBoardId: Record<number, Record<string, number>> = {};
+  await Promise.all(
+    boards.map(async (b) => {
+      countsByBoardId[b.id] = await getColumnCounts(c.env.DB, b.id);
+    })
+  );
+  const flashKind = c.req.query('ok') ? 'ok' : c.req.query('err') ? 'err' : undefined;
+  const flashMsg = c.req.query('ok') ?? c.req.query('err') ?? undefined;
+  return c.html(
+    <KanbanBoardListPage
+      user={user}
+      boards={boards}
+      countsByBoardId={countsByBoardId}
+      columns={KANBAN_COLUMNS as unknown as string[]}
+      flash={flashKind && flashMsg ? { kind: flashKind, message: flashMsg } : undefined}
+    />
+  );
 });
 
-kanbanRoutes.get('/ws', async (c) => {
+kanbanRoutes.post('/', requireRole('staff'), async (c) => {
+  const user = c.get('user');
+  const form = await c.req.formData();
+  const name = String(form.get('name') ?? '').trim();
+  const slugRaw = String(form.get('slug') ?? '').trim();
+  if (!name || name.length > 100) {
+    return c.redirect(
+      `/kanban?err=${encodeURIComponent('Name is required (max 100 chars).')}`,
+      302
+    );
+  }
+  try {
+    const board = await createBoard(
+      c.env.DB,
+      { name, slug: slugRaw || undefined },
+      user.id
+    );
+    return c.redirect(
+      `/kanban/${encodeURIComponent(board.slug)}?ok=${encodeURIComponent('Board created.')}`,
+      302
+    );
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    // UNIQUE violation on slug → friendly error.
+    const friendly = msg.includes('UNIQUE') || msg.includes('constraint')
+      ? 'A board with that slug already exists — pick a different name or slug.'
+      : `Could not create board: ${msg}`;
+    return c.redirect(`/kanban?err=${encodeURIComponent(friendly)}`, 302);
+  }
+});
+
+// ── Board page ──────────────────────────────────────────────────────────
+
+kanbanRoutes.get('/:slug', async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  return c.html(<KanbanPage user={user} board={board} />);
+});
+
+kanbanRoutes.get('/:slug/ws', async (c) => {
   if (c.req.header('Upgrade') !== 'websocket') {
     return c.text('Expected WebSocket upgrade', 426);
   }
-
   const user = c.get('user');
-  const id = c.env.KANBAN_DO.idFromName('main-board');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+
+  const id = c.env.KANBAN_DO.idFromName(`board-${board.id}`);
   const stub = c.env.KANBAN_DO.get(id);
 
   const forwarded = new Request(c.req.raw.url, {
@@ -40,8 +119,53 @@ kanbanRoutes.get('/ws', async (c) => {
       'X-User-Id': String(user.id),
       'X-User-Email': user.email,
       'X-User-Display-Name': user.displayName ?? '',
+      'X-Board-Id': String(board.id),
     },
   });
 
   return stub.fetch(forwarded);
+});
+
+// ── Board mutations ─────────────────────────────────────────────────────
+
+kanbanRoutes.post('/:slug/rename', requireRole('staff'), async (c) => {
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  const form = await c.req.formData();
+  const name = String(form.get('name') ?? '').trim();
+  if (!name || name.length > 100) {
+    return c.redirect(
+      `/kanban?err=${encodeURIComponent('Name is required (max 100 chars).')}`,
+      302
+    );
+  }
+  await renameBoard(c.env.DB, board.id, name);
+  return c.redirect(`/kanban?ok=${encodeURIComponent('Board renamed.')}`, 302);
+});
+
+kanbanRoutes.post('/:slug/delete', requireRole('staff'), async (c) => {
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  const form = await c.req.formData();
+  if (String(form.get('confirm') ?? '') !== board.slug) {
+    return c.redirect(
+      `/kanban?err=${encodeURIComponent('Delete confirmation did not match; board not deleted.')}`,
+      302
+    );
+  }
+  // Never allow deleting the very last board — keeps the app in a valid state.
+  const all = await listBoards(c.env.DB);
+  if (all.length <= 1) {
+    return c.redirect(
+      `/kanban?err=${encodeURIComponent('Cannot delete the only remaining board.')}`,
+      302
+    );
+  }
+  await deleteBoard(c.env.DB, board.id);
+  return c.redirect(
+    `/kanban?ok=${encodeURIComponent(`Board "${board.name}" deleted.`)}`,
+    302
+  );
 });

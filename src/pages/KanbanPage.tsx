@@ -15,12 +15,12 @@ import type { FC } from 'hono/jsx';
 import { raw } from 'hono/html';
 import { Layout } from './Layout';
 import type { AuthUser } from '../env';
+import type { BoardDto, ColumnName } from '../services/kanban.service';
 
 interface KanbanPageProps {
   user: AuthUser;
+  board: BoardDto;
 }
-
-import type { ColumnName } from '../services/kanban.service';
 
 export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
   { key: 'not_started', label: 'Not Started' },
@@ -31,16 +31,17 @@ export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
   { key: 'done', label: 'Done' },
 ];
 
-export const KanbanPage: FC<KanbanPageProps> = ({ user }) => {
+export const KanbanPage: FC<KanbanPageProps> = ({ user, board }) => {
   return (
-    <Layout title="Kanban" user={user}>
+    <Layout title={`Kanban · ${board.name}`} user={user}>
       <style>{kanbanCss}</style>
       <div class="kanban-head">
-        <h1>Kanban</h1>
+        <a class="kanban-back" href="/kanban" aria-label="Back to board list">← All boards</a>
+        <h1>{board.name}</h1>
         <span id="kanban-status" class="kanban-status kanban-status-pending">Connecting…</span>
       </div>
 
-      <div class="kanban-board" id="kanban-board">
+      <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
         {COLUMNS.map((col) => (
           <section class="kanban-col" data-col={col.key}>
             <header class="kanban-col-head">
@@ -96,8 +97,10 @@ const kanbanCss = `
   /* Break out of Layout's .main max-width: 960px; 6 columns need ~1200px. */
   body:has(.kanban-board) .main { max-width: none; padding: 0 16px; }
 
-  .kanban-head { display: flex; align-items: center; gap: 16px; }
+  .kanban-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .kanban-head h1 { margin: 0; }
+  .kanban-back { text-decoration: none; color: inherit; opacity: 0.7; font-size: 0.9em; }
+  .kanban-back:hover { opacity: 1; text-decoration: underline; }
   .kanban-status { font-size: 0.85em; padding: 4px 10px; border-radius: 999px; }
   .kanban-status-ok { background: rgba(34,197,94,0.15); color: inherit; border: 1px solid rgba(34,197,94,0.4); }
   .kanban-status-pending { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4); }
@@ -511,7 +514,8 @@ const kanbanClientJs = `
   function connect() {
     setStatus('Connecting…', 'pending');
     var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    ws = new WebSocket(proto + location.host + '/kanban/ws');
+    var slug = boardEl.getAttribute('data-board-slug') || '';
+    ws = new WebSocket(proto + location.host + '/kanban/' + encodeURIComponent(slug) + '/ws');
     ws.addEventListener('open', function() {
       reconnectAttempt = 0;
       setStatus('Live', 'ok');

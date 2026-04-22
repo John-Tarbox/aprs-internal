@@ -101,6 +101,11 @@ interface SocketAttachment {
   userId: number;
   email: string;
   displayName: string | null;
+  // Which board this socket is connected to. Each DO instance is per-board
+  // (idFromName('board-' + id)), but we also store it on the attachment so
+  // service calls can pass it explicitly rather than relying on DO-internal
+  // state that the `ctx` doesn't expose.
+  boardId: number;
   // Sliding window of recent message timestamps (ms since epoch), for rate
   // limiting. Kept bounded to MAX_MSG_PER_SEC entries.
   recentMs: number[];
@@ -119,11 +124,16 @@ export class KanbanBoardDO extends DurableObject<Env> {
     const userIdRaw = request.headers.get('X-User-Id');
     const email = request.headers.get('X-User-Email');
     const displayName = request.headers.get('X-User-Display-Name');
+    const boardIdRaw = request.headers.get('X-Board-Id');
     const userId = userIdRaw ? Number.parseInt(userIdRaw, 10) : NaN;
+    const boardId = boardIdRaw ? Number.parseInt(boardIdRaw, 10) : NaN;
     if (!Number.isFinite(userId) || userId <= 0 || !email) {
       // The Worker route is supposed to inject these; if they're missing
       // something is wrong with the caller chain.
       return new Response('Unauthorized', { status: 401 });
+    }
+    if (!Number.isFinite(boardId) || boardId <= 0) {
+      return new Response('Missing or invalid board id', { status: 400 });
     }
 
     const pair = new WebSocketPair();
@@ -135,12 +145,13 @@ export class KanbanBoardDO extends DurableObject<Env> {
       userId,
       email,
       displayName: displayName || null,
+      boardId,
       recentMs: [],
     };
     server.serializeAttachment(attachment);
 
-    // Send initial snapshot. If this throws, the socket will close.
-    const cards = await listCards(this.env.DB);
+    // Send initial snapshot for this board. If this throws, the socket will close.
+    const cards = await listCards(this.env.DB, boardId);
     server.send(
       JSON.stringify({ type: 'snapshot', cards: cards.map(cardToDto) })
     );
@@ -178,7 +189,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
     try {
       switch (parsed.type) {
         case 'hello': {
-          const cards = await listCards(this.env.DB);
+          const cards = await listCards(this.env.DB, attachment.boardId);
           this.sendTo(ws, { type: 'snapshot', cards });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
@@ -186,6 +197,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
         case 'create_card': {
           const card = await createCard(
             this.env.DB,
+            attachment.boardId,
             {
               column: parsed.column,
               title: parsed.title,
