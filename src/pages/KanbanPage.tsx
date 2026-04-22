@@ -265,26 +265,30 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
 
       <div id="kanban-toast" class="kanban-toast" hidden></div>
 
-      {/* JSON data island — server-rendered list of known group names for
-          autocomplete. Safe: JSON.stringify escapes everything, and the
-          client parses via textContent (not eval) when the type is JSON. */}
+      {/* JSON data islands — server-rendered structured data the client
+          reads via `document.getElementById(…).textContent`. Hono JSX
+          HTML-escapes any interpolated string, which turns " → &quot;
+          inside the script content. Script blocks (even type=application/
+          json) are raw-text elements in HTML5 — the browser does NOT
+          decode HTML entities inside them, so JSON.parse() would see
+          literal &quot; and throw. The fix is `raw()` + pre-escaping
+          </ to <\/ to prevent script-block break-out if any string
+          ever contains a closing script tag. */}
       <script type="application/json" id="kanban-known-groups">
-        {JSON.stringify(knownGroups)}
+        {raw(JSON.stringify(knownGroups).replace(/<\//g, '<\\/'))}
       </script>
-      {/* Current user identity — used by the comment UI to decide which
-          rows show inline edit/delete buttons. Same safety story as above. */}
       <script type="application/json" id="kanban-current-user">
-        {JSON.stringify({
-          id: user.id,
-          displayName: user.displayName,
-          isAdmin: user.roles.includes('admin'),
-          isStaff: user.roles.includes('admin') || user.roles.includes('staff'),
-        })}
+        {raw(
+          JSON.stringify({
+            id: user.id,
+            displayName: user.displayName,
+            isAdmin: user.roles.includes('admin'),
+            isStaff: user.roles.includes('admin') || user.roles.includes('staff'),
+          }).replace(/<\//g, '<\\/')
+        )}
       </script>
-      {/* Active-user directory for the assignee picker. Same safety story
-          as the other JSON islands above. */}
       <script type="application/json" id="kanban-known-users">
-        {JSON.stringify(knownUsers)}
+        {raw(JSON.stringify(knownUsers).replace(/<\//g, '<\\/'))}
       </script>
 
       {/* SortableJS is pinned to a specific version. For stricter security posture,
