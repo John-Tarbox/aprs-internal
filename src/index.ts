@@ -19,6 +19,7 @@ import { publicPageRoutes, authedPageRoutes } from './routes/page.routes';
 import { adminRoutes } from './routes/admin.routes';
 import { kanbanRoutes } from './routes/kanban.routes';
 import { notificationsRoutes } from './routes/notifications.routes';
+import { savedFiltersRoutes } from './routes/saved_filters.routes';
 import { authMiddleware, requireRole } from './middleware/auth';
 
 // Re-exported at module level so the Workers runtime can find the class
@@ -42,6 +43,7 @@ app.route('/admin', adminRoutes);
 
 app.route('/kanban', kanbanRoutes);
 app.route('/api/notifications', notificationsRoutes);
+app.route('/api/filters', savedFiltersRoutes);
 
 app.route('/', authedPageRoutes);      // /
 

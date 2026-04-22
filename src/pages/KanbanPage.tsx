@@ -60,6 +60,8 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         </button>
       </div>
 
+      <div id="kanban-saved-filters" class="kanban-saved-filters" aria-label="Saved filters" hidden></div>
+
       <div class="kanban-filters" id="kanban-filters" role="search" aria-label="Filter cards">
         <input type="search" id="kf-search" class="kf-search"
                placeholder="Search… or operators: assigned:lion label:urgent column:done has:due is:overdue"
@@ -78,6 +80,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
           <span>Has due date</span>
         </label>
         <button type="button" id="kf-clear" class="btn kf-clear" hidden>Clear</button>
+        <button type="button" id="kf-save-filter" class="btn kf-save-filter" hidden title="Save the current query as a named filter">★ Save</button>
         <span id="kf-count" class="kf-count" aria-live="polite"></span>
       </div>
 
@@ -273,6 +276,40 @@ const kanbanCss = `
   .kanban-status-ok { background: rgba(34,197,94,0.15); color: inherit; border: 1px solid rgba(34,197,94,0.4); }
   .kanban-status-pending { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4); }
   .kanban-status-err { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); }
+
+  /* Saved-filter chips row above the filter bar (P4). */
+  .kanban-saved-filters {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin-top: 12px;
+  }
+  .kanban-saved-filters[hidden] { display: none; }
+  .ksf-label {
+    font-size: 0.78em; opacity: 0.6; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-right: 4px;
+  }
+  .ksf-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px;
+    border: 1px solid rgba(128,128,128,0.4); background: transparent;
+    color: inherit; font: inherit; font-size: 0.85em; cursor: pointer;
+  }
+  .ksf-chip:hover { background: rgba(128,128,128,0.12); }
+  .ksf-chip.ksf-chip-active {
+    background: var(--brand-tint-weak, rgba(37,99,235,0.14));
+    border-color: var(--brand-tint-strong, rgba(37,99,235,0.45));
+  }
+  .ksf-chip-name { white-space: nowrap; }
+  .ksf-chip-scope {
+    font-size: 0.75em; opacity: 0.55; font-style: italic;
+  }
+  .ksf-chip-del {
+    background: none; border: none; cursor: pointer; color: inherit;
+    font-size: 1em; padding: 0 2px; opacity: 0;
+  }
+  .ksf-chip:hover .ksf-chip-del,
+  .ksf-chip:focus-within .ksf-chip-del { opacity: 0.6; }
+  .ksf-chip-del:hover { opacity: 1; color: #b91c1c; }
+  .kf-save-filter { padding: 6px 12px; font-size: 0.85em; }
 
   /* Filter bar above the board. */
   .kanban-filters {
@@ -1205,12 +1242,137 @@ const kanbanClientJs = `
       countEl.textContent = '';
       clearBtnEl.hidden = true;
     }
+    // Save button visible whenever the text query is non-empty (toggles
+    // alone don't get saved — they're stateful UI controls, not queries).
+    if (saveFilterBtn) {
+      saveFilterBtn.hidden = !filterState.query;
+    }
+    // Re-render saved-filter chips so the active highlight tracks the
+    // current query — cheap because rendering is local DOM only.
+    if (savedFilters.length > 0) renderSavedFilters();
   }
 
   function setFilter(partial) {
     Object.assign(filterState, partial);
     applyFilters();
   }
+
+  // ── Saved filters (P4) ──────────────────────────────────────────────
+  // Per-user named queries fetched from /api/filters?board=<slug>. Click
+  // a chip to apply; ★ Save adds the current query as a named filter.
+  // Delete via × on hover. The "active" chip is the one whose query is
+  // an exact match for the current filterState.query.
+  var savedFiltersBarEl = document.getElementById('kanban-saved-filters');
+  var saveFilterBtn = document.getElementById('kf-save-filter');
+  var savedFilters = [];
+  var boardSlugForFilters = boardEl.getAttribute('data-board-slug') || '';
+
+  function renderSavedFilters() {
+    while (savedFiltersBarEl.firstChild) savedFiltersBarEl.removeChild(savedFiltersBarEl.firstChild);
+    if (savedFilters.length === 0) {
+      savedFiltersBarEl.hidden = true;
+      return;
+    }
+    savedFiltersBarEl.hidden = false;
+    var label = document.createElement('span');
+    label.className = 'ksf-label';
+    label.textContent = 'Saved:';
+    savedFiltersBarEl.appendChild(label);
+    savedFilters.forEach(function(f) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'ksf-chip';
+      if (filterState.query && filterState.query === f.query) {
+        chip.classList.add('ksf-chip-active');
+      }
+      chip.title = f.query;
+      var n = document.createElement('span');
+      n.className = 'ksf-chip-name';
+      n.textContent = f.name;
+      chip.appendChild(n);
+      if (f.boardId === null) {
+        // Board-agnostic filters get a tiny "·all" marker so the user
+        // knows clicking it isn't board-specific.
+        var scope = document.createElement('span');
+        scope.className = 'ksf-chip-scope';
+        scope.textContent = 'all boards';
+        chip.appendChild(scope);
+      }
+      chip.addEventListener('click', function() {
+        searchInputEl.value = f.query;
+        setFilter({ query: f.query });
+        renderSavedFilters();
+      });
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'ksf-chip-del';
+      del.textContent = '×';
+      del.setAttribute('aria-label', 'Delete saved filter ' + f.name);
+      del.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        if (!confirm('Delete saved filter "' + f.name + '"?')) return;
+        fetch('/api/filters/' + f.id, { method: 'DELETE', credentials: 'same-origin' })
+          .then(function(r) { return r.ok ? r.json() : Promise.reject(r); })
+          .then(function() {
+            savedFilters = savedFilters.filter(function(x) { return x.id !== f.id; });
+            renderSavedFilters();
+          })
+          .catch(function() { showToast('Could not delete filter.', 4000); });
+      });
+      chip.appendChild(del);
+      savedFiltersBarEl.appendChild(chip);
+    });
+  }
+
+  function refreshSavedFilters() {
+    fetch('/api/filters?board=' + encodeURIComponent(boardSlugForFilters), {
+      credentials: 'same-origin',
+    })
+      .then(function(r) { return r.ok ? r.json() : { items: [] }; })
+      .then(function(j) {
+        savedFilters = (j.items || []).slice();
+        renderSavedFilters();
+      })
+      .catch(function() { /* silent — chip row stays empty */ });
+  }
+
+  saveFilterBtn.addEventListener('click', function() {
+    var query = filterState.query.trim();
+    if (!query) {
+      showToast('Type a query first, then save it.', 3500);
+      return;
+    }
+    var name = prompt('Name this filter:', '');
+    if (name === null) return;
+    name = name.trim();
+    if (!name) return;
+    saveFilterBtn.disabled = true;
+    fetch('/api/filters', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, query: query, boardSlug: boardSlugForFilters }),
+    })
+      .then(function(r) {
+        if (r.status === 409) throw new Error('duplicate');
+        return r.ok ? r.json() : Promise.reject(r);
+      })
+      .then(function(j) {
+        if (j.filter) savedFilters.push(j.filter);
+        renderSavedFilters();
+        showToast('Saved filter "' + name + '".', 3000);
+      })
+      .catch(function(err) {
+        if (err && err.message === 'duplicate') {
+          showToast('A filter with that name already exists.', 4000);
+        } else {
+          showToast('Could not save filter.', 4000);
+        }
+      })
+      .then(function() { saveFilterBtn.disabled = false; });
+  });
+
+  refreshSavedFilters();
 
   searchInputEl.addEventListener('input', function() {
     setFilter({ query: searchInputEl.value.trim() });
