@@ -23,9 +23,22 @@ import { SESSION_COOKIE_NAME } from '../middleware/auth';
 
 const OKTA_SESSION_TTL = 7 * 24 * 60 * 60;   // 7 days
 const GOOGLE_SESSION_TTL = 8 * 60 * 60;      // 8 hours
+const GUEST_SESSION_TTL = 24 * 60 * 60;      // 24 hours — bypass is short-lived
 // Okta auto-provisions anyone in the APRS Foundation tenant as staff on
 // first sign-in. Google users remain admin-invite-only (see /google/callback).
 const DEFAULT_NEW_USER_ROLE: RoleName = 'staff';
+
+/** Constant-time string compare. Equal-length strings only. */
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -54,6 +67,85 @@ async function issueSessionCookie(
     sameSite: 'Lax',
   });
 }
+
+// ── Guest login (testing-only bypass) ───────────────────────────────────
+//
+// Opt-in via the GUEST_LOGIN_TOKEN wrangler secret. When the secret is
+// unset, this endpoint is a hard 403 — nothing an attacker can probe for
+// reveals whether it's armed. When set, a caller with the secret token
+// can sign in as any email; the row is auto-provisioned as staff if it
+// doesn't exist. Use sparingly, rotate by rewriting the secret, and
+// delete the secret entirely when done (`wrangler secret delete GUEST_LOGIN_TOKEN`).
+//
+// Every invocation writes a login.guest (or login.guest.denied) audit row
+// so the usage trail is queryable.
+authRoutes.get('/guest-login', async (c) => {
+  const expected = c.env.GUEST_LOGIN_TOKEN;
+  if (!expected) {
+    // Do not leak whether the feature is armed — treat missing secret
+    // the same as a bad token.
+    return c.text('Not found', 404);
+  }
+
+  const tokenRaw = c.req.query('token') ?? '';
+  const emailRaw = (c.req.query('email') ?? '').trim().toLowerCase();
+
+  if (!safeEqual(tokenRaw, expected)) {
+    await writeAudit(c.env.DB, {
+      action: 'login.guest.denied',
+      metadata: { reason: 'bad token', emailAttempted: emailRaw || null },
+      ip: getClientIp(c),
+    });
+    return c.text('Forbidden', 403);
+  }
+
+  if (!emailRaw || !EMAIL_RE.test(emailRaw)) {
+    await writeAudit(c.env.DB, {
+      action: 'login.guest.denied',
+      metadata: { reason: 'missing or invalid email', emailAttempted: emailRaw || null },
+      ip: getClientIp(c),
+    });
+    return c.text('Missing or invalid email query parameter', 400);
+  }
+
+  let user = await findUserByEmail(c.env.DB, emailRaw);
+  if (user && !user.active) {
+    await writeAudit(c.env.DB, {
+      userId: user.id,
+      action: 'login.guest.denied',
+      metadata: { email: emailRaw, reason: 'account deactivated' },
+      ip: getClientIp(c),
+    });
+    return c.redirect(
+      `/access-denied?reason=${encodeURIComponent('Account is deactivated.')}`,
+      302
+    );
+  }
+  if (!user) {
+    user = await insertUser(c.env.DB, { email: emailRaw, authType: 'okta' });
+    await setUserRoles(c.env.DB, user.id, [DEFAULT_NEW_USER_ROLE], null);
+  }
+
+  const sessionId = await createSession(c.env.DB, {
+    userId: user.id,
+    ttlSeconds: GUEST_SESSION_TTL,
+    userAgent: c.req.header('User-Agent') ?? undefined,
+    ip: getClientIp(c) ?? undefined,
+  });
+  await touchLastLogin(c.env.DB, user.id);
+  await writeAudit(c.env.DB, {
+    userId: user.id,
+    action: 'login.guest',
+    metadata: { email: emailRaw },
+    ip: getClientIp(c),
+  });
+
+  const cookie = await issueSessionCookie(sessionId, c.env.SESSION_SECRET, GUEST_SESSION_TTL);
+  c.header('Set-Cookie', cookie, { append: true });
+
+  // Never honor a `next` — guest login always drops the user on the home page.
+  return c.redirect('/', 302);
+});
 
 // ── Okta ────────────────────────────────────────────────────────────────
 

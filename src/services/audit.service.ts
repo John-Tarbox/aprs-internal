@@ -13,6 +13,8 @@ export type AuditAction =
   | 'login.google'
   | 'login.google.denied'
   | 'login.google.failed'
+  | 'login.guest'
+  | 'login.guest.denied'
   | 'logout'
   | 'user.invited'
   | 'user.deactivated'
