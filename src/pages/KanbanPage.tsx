@@ -111,6 +111,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
                   style={`background: ${col.color ?? '#999999'}`}
                   aria-label={`Color for column ${col.label}`}
                   title="Set column color"
+                  onclick="if(window.__kanbanOpenColumnColor){window.__kanbanOpenColumnColor(this);}else{console.warn('column-color handler not ready');}"
                 ></button>
               ) : null}
               {isStaff ? (
@@ -2064,6 +2065,12 @@ const kanbanClientJs = `
       picker.style.background = col.color || '#999999';
       picker.title = 'Set column color';
       picker.setAttribute('aria-label', 'Color for column ' + col.label);
+      // Inline onclick as a guaranteed-fires fallback — same global as
+      // the server-rendered buttons use.
+      picker.setAttribute(
+        'onclick',
+        "if(window.__kanbanOpenColumnColor){window.__kanbanOpenColumnColor(this);}"
+      );
       head.appendChild(picker);
 
       var del = document.createElement('button');
@@ -2183,6 +2190,29 @@ const kanbanClientJs = `
 
   // Also the delegated fallback, same handler.
   boardEl.addEventListener('click', onColumnColorClick);
+
+  // Global fallback: the JSX buttons have inline onclick="" that calls
+  // this function. This path sidesteps event delegation entirely and
+  // works even if every other listener is somehow blocked. Exposed on
+  // window because inline onclick attributes run in global scope.
+  window.__kanbanOpenColumnColor = function(el) {
+    if (!el || !el.getAttribute) return;
+    if (!currentUser.isStaff) return;
+    var col = el.getAttribute('data-col-color-input');
+    if (!col) return;
+    var cfg = columnConfig.get(col);
+    var current = (cfg && cfg.color) || '';
+    openWebSafeColorPicker({
+      anchor: el,
+      current: current,
+      allowClear: true,
+      onChange: function(newColor) {
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'set_column_color', column: col });
+        send({ type: 'set_column_color', clientMsgId: cmid, column: col, color: newColor });
+      },
+    });
+  };
 
   // Delete column (×).
   boardEl.addEventListener('click', function(e) {
