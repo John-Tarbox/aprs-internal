@@ -15,12 +15,14 @@ import type { FC } from 'hono/jsx';
 import { raw } from 'hono/html';
 import { Layout } from './Layout';
 import type { AuthUser } from '../env';
-import type { BoardDto, ColumnName } from '../services/kanban.service';
+import type { AssigneeDto, BoardDto, ColumnName } from '../services/kanban.service';
 
 interface KanbanPageProps {
   user: AuthUser;
   board: BoardDto;
   knownGroups: string[];
+  /** Active-user directory for the assignee picker. */
+  knownUsers: AssigneeDto[];
 }
 
 export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
@@ -32,7 +34,7 @@ export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
   { key: 'done', label: 'Done' },
 ];
 
-export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) => {
+export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, knownUsers }) => {
   return (
     <Layout title={`Kanban · ${board.name}`} user={user}>
       <style>{kanbanCss}</style>
@@ -84,7 +86,18 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
                 <button type="button" id="kf-groups-add" class="btn">Add</button>
               </div>
             </div>
-            <label>Assigned
+            <div class="kf-assignees-field">
+              <span class="kf-assignees-label">Assignees</span>
+              <div id="kf-assignees-chips" class="kf-assignees-chips" aria-live="polite"></div>
+              <div class="kf-assignees-entry">
+                <input type="text" id="kf-assignees-input" list="kf-assignees-suggest"
+                       placeholder="Type a name or email and press Enter"
+                       aria-label="Add an assignee" />
+                <datalist id="kf-assignees-suggest"></datalist>
+                <button type="button" id="kf-assignees-add" class="btn">Add</button>
+              </div>
+            </div>
+            <label>Assigned (legacy text — for non-users)
               <input type="text" id="kf-assigned" maxlength={100} />
             </label>
             <label>Due Date
@@ -94,6 +107,19 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
               <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
             </label>
+            <section id="kf-comments" class="kf-comments" hidden aria-label="Comments">
+              <h3 class="kf-comments-title">Comments</h3>
+              <ol id="kf-comments-list" class="kf-comments-list"></ol>
+              <p id="kf-comments-empty" class="kf-comments-empty" hidden>No comments yet — be the first.</p>
+              <div class="kf-comment-composer">
+                <textarea id="kf-comment-input" rows={2} maxlength={5000}
+                          placeholder="Write a comment… (Markdown supported, Ctrl+Enter to post)"
+                          aria-label="New comment"></textarea>
+                <div class="kf-comment-composer-actions">
+                  <button type="button" id="kf-comment-post" class="btn btn-primary">Post</button>
+                </div>
+              </div>
+            </section>
             <section id="kf-activity" class="kf-activity" hidden aria-label="Activity timeline">
               <h3 class="kf-activity-title">Activity</h3>
               <ol id="kf-activity-list" class="kf-activity-list"></ol>
@@ -117,6 +143,20 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
           client parses via textContent (not eval) when the type is JSON. */}
       <script type="application/json" id="kanban-known-groups">
         {JSON.stringify(knownGroups)}
+      </script>
+      {/* Current user identity — used by the comment UI to decide which
+          rows show inline edit/delete buttons. Same safety story as above. */}
+      <script type="application/json" id="kanban-current-user">
+        {JSON.stringify({
+          id: user.id,
+          displayName: user.displayName,
+          isAdmin: user.roles.includes('admin'),
+        })}
+      </script>
+      {/* Active-user directory for the assignee picker. Same safety story
+          as the other JSON islands above. */}
+      <script type="application/json" id="kanban-known-users">
+        {JSON.stringify(knownUsers)}
       </script>
 
       {/* SortableJS is pinned to a specific version. For stricter security posture,
@@ -211,6 +251,68 @@ const kanbanCss = `
     display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
   }
 
+  /* Comments thread in the card modal. */
+  .kf-comments { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-comments[hidden] { display: none; }
+  .kf-comments-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-comments-list {
+    list-style: none; margin: 0 0 12px 0; padding: 0;
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 280px; overflow-y: auto;
+  }
+  .kf-comment {
+    background: rgba(128,128,128,0.06);
+    border: 1px solid rgba(128,128,128,0.2);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.9em;
+    position: relative;
+  }
+  .kf-comment-head {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 0.85em; margin-bottom: 4px;
+  }
+  .kf-comment-author { font-weight: 600; }
+  .kf-comment-time { opacity: 0.6; }
+  .kf-comment-edited { opacity: 0.6; font-style: italic; font-size: 0.85em; }
+  .kf-comment-body p,
+  .kf-comment-body ul,
+  .kf-comment-body ol { margin: 0; padding: 0; }
+  .kf-comment-body ul,
+  .kf-comment-body ol { padding-left: 1.2em; }
+  .kf-comment-body p + p { margin-top: 6px; }
+  .kf-comment-body code {
+    background: rgba(128,128,128,0.18); padding: 0 3px; border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.95em;
+  }
+  .kf-comment-body a { color: inherit; text-decoration: underline; }
+  .kf-comment-actions {
+    display: flex; gap: 6px; margin-top: 6px;
+    opacity: 0; transition: opacity 0.1s;
+  }
+  .kf-comment:hover .kf-comment-actions,
+  .kf-comment:focus-within .kf-comment-actions { opacity: 1; }
+  .kf-comment-action {
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: inherit; font: inherit; font-size: 0.8em; opacity: 0.7;
+    text-decoration: underline;
+  }
+  .kf-comment-action:hover { opacity: 1; }
+  .kf-comment-edit-area {
+    display: flex; flex-direction: column; gap: 6px; margin-top: 4px;
+  }
+  .kf-comment-edit-area textarea {
+    width: 100%; box-sizing: border-box;
+  }
+  .kf-comment-edit-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .kf-comments-empty { font-size: 0.85em; opacity: 0.6; font-style: italic; margin: 4px 0 12px; }
+  .kf-comment-composer { display: flex; flex-direction: column; gap: 6px; }
+  .kf-comment-composer textarea {
+    width: 100%; box-sizing: border-box; font-family: inherit;
+  }
+  .kf-comment-composer-actions { display: flex; gap: 6px; justify-content: flex-end; }
+
   /* Activity timeline in the card modal. */
   .kf-activity { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
   .kf-activity[hidden] { display: none; }
@@ -289,6 +391,24 @@ const kanbanCss = `
     opacity: 0.6; margin-top: 4px;
   }
 
+  /* Multi-select assignees control in the modal — same shape as groups. */
+  .kf-assignees-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .kf-assignees-label { font-size: 0.9em; }
+  .kf-assignees-chips { display: flex; flex-wrap: wrap; gap: 4px; min-height: 18px; }
+  .kf-assignee-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(56,189,248,0.18); padding: 1px 6px; border-radius: 999px;
+    font-size: 0.85em;
+  }
+  .kf-assignee-remove {
+    background: none; border: none; color: inherit; cursor: pointer;
+    font: inherit; font-size: 1.1em; line-height: 1; padding: 0 2px; opacity: 0.7;
+  }
+  .kf-assignee-remove:hover { opacity: 1; }
+  .kf-assignees-entry { display: flex; gap: 6px; }
+  .kf-assignees-entry input { flex: 1; }
+  .kanban-chip-assignee { background: rgba(56,189,248,0.18); }
+
   /* Multi-select groups control in the modal. */
   .kf-groups-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .kf-groups-label { font-size: 0.9em; }
@@ -349,6 +469,123 @@ const kanbanClientJs = `
   var activitySectionEl = document.getElementById('kf-activity');
   var activityListEl = document.getElementById('kf-activity-list');
   var activityEmptyEl = document.getElementById('kf-activity-empty');
+  var commentsSectionEl = document.getElementById('kf-comments');
+  var commentsListEl = document.getElementById('kf-comments-list');
+  var commentsEmptyEl = document.getElementById('kf-comments-empty');
+  var commentInputEl = document.getElementById('kf-comment-input');
+  var commentPostBtn = document.getElementById('kf-comment-post');
+
+  // Current user identity, parsed from a JSON island the server emits.
+  // Used to gate inline edit/delete buttons. Falls back to a placeholder
+  // if the island is missing (defensive — should always be present).
+  var currentUser = { id: 0, displayName: null, isAdmin: false };
+  try {
+    var cuRaw = document.getElementById('kanban-current-user');
+    if (cuRaw && cuRaw.textContent) {
+      currentUser = JSON.parse(cuRaw.textContent) || currentUser;
+    }
+  } catch (_err) { /* keep default */ }
+
+  // Active-user directory for the assignee picker.
+  var knownUsers = [];
+  try {
+    var kuRaw = document.getElementById('kanban-known-users');
+    if (kuRaw && kuRaw.textContent) knownUsers = JSON.parse(kuRaw.textContent) || [];
+  } catch (_err) { knownUsers = []; }
+  // Index for fast lookup by display key (lowercased name or email).
+  function userKey(u) {
+    return ((u.displayName || u.email || '') + ' <' + (u.email || '') + '>').toLowerCase();
+  }
+  var assigneesChipsEl = document.getElementById('kf-assignees-chips');
+  var assigneesInputEl = document.getElementById('kf-assignees-input');
+  var assigneesAddBtn = document.getElementById('kf-assignees-add');
+  var assigneesDatalist = document.getElementById('kf-assignees-suggest');
+  var selectedAssignees = []; // array of AssigneeDto
+
+  function rebuildAssigneesDatalist() {
+    while (assigneesDatalist.firstChild) assigneesDatalist.removeChild(assigneesDatalist.firstChild);
+    var taken = new Set();
+    selectedAssignees.forEach(function(a) { taken.add(a.userId); });
+    knownUsers.forEach(function(u) {
+      if (taken.has(u.userId)) return;
+      var opt = document.createElement('option');
+      // Datalist shows the value; we use "Display Name <email>" so users
+      // can disambiguate two people with the same display name. Parsing
+      // back happens in addAssigneeFromInput.
+      opt.value = (u.displayName || u.email) + ' <' + u.email + '>';
+      assigneesDatalist.appendChild(opt);
+    });
+  }
+
+  function renderSelectedAssignees() {
+    while (assigneesChipsEl.firstChild) assigneesChipsEl.removeChild(assigneesChipsEl.firstChild);
+    selectedAssignees.forEach(function(a, idx) {
+      var c = document.createElement('span');
+      c.className = 'kanban-chip kf-assignee-chip';
+      var txt = document.createElement('span');
+      txt.textContent = a.displayName || a.email;
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'kf-assignee-remove';
+      x.setAttribute('aria-label', 'Remove assignee ' + (a.displayName || a.email));
+      x.textContent = '×';
+      x.addEventListener('click', function() {
+        selectedAssignees.splice(idx, 1);
+        renderSelectedAssignees();
+        rebuildAssigneesDatalist();
+      });
+      c.appendChild(txt);
+      c.appendChild(x);
+      assigneesChipsEl.appendChild(c);
+    });
+    rebuildAssigneesDatalist();
+  }
+
+  function findUserMatch(typed) {
+    var t = typed.trim().toLowerCase();
+    if (!t) return null;
+    // Exact-email match wins.
+    var byEmail = null, byDisplay = null, byEmailContains = null;
+    for (var i = 0; i < knownUsers.length; i++) {
+      var u = knownUsers[i];
+      if ((u.email || '').toLowerCase() === t) return u;
+      if (!byDisplay && (u.displayName || '').toLowerCase() === t) byDisplay = u;
+      // Recognize the "Display <email>" shape from the datalist.
+      var combo = ((u.displayName || u.email) + ' <' + u.email + '>').toLowerCase();
+      if (combo === t) return u;
+      if (!byEmailContains && (u.email || '').toLowerCase().indexOf(t) === 0) byEmailContains = u;
+    }
+    return byDisplay || byEmailContains;
+  }
+
+  function addAssigneeFromInput() {
+    var v = assigneesInputEl.value;
+    if (!v.trim()) return;
+    var match = findUserMatch(v);
+    if (!match) {
+      showToast('No user matches "' + v + '" — try their email.', 3500);
+      return;
+    }
+    if (selectedAssignees.some(function(a) { return a.userId === match.userId; })) {
+      // Already selected — silently ignore.
+    } else {
+      selectedAssignees.push(match);
+      renderSelectedAssignees();
+    }
+    assigneesInputEl.value = '';
+    assigneesInputEl.focus();
+  }
+
+  assigneesAddBtn.addEventListener('click', addAssigneeFromInput);
+  assigneesInputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addAssigneeFromInput();
+    }
+  });
+  assigneesInputEl.addEventListener('change', function() {
+    if (assigneesInputEl.value.trim()) addAssigneeFromInput();
+  });
 
   // Column key -> display label. Duplicated from COLUMNS on the server side
   // so the activity strings can show "moved from Started to Done" rather
@@ -672,6 +909,15 @@ const kanbanClientJs = `
     if (Array.isArray(card.groups)) {
       card.groups.forEach(function(g) { meta.appendChild(chip(g)); });
     }
+    if (Array.isArray(card.assignees)) {
+      card.assignees.forEach(function(a) {
+        var label = '@ ' + (a.displayName || a.email);
+        var ch = chip(label);
+        ch.classList.add('kanban-chip-assignee');
+        ch.title = a.email;
+        meta.appendChild(ch);
+      });
+    }
     if (card.assigned) meta.appendChild(chip('@ ' + card.assigned));
     if (card.dueDate) meta.appendChild(chip('Due ' + card.dueDate));
     if (meta.childNodes.length > 0) el.appendChild(meta);
@@ -693,6 +939,184 @@ const kanbanClientJs = `
     c.textContent = text;
     return c;
   }
+
+  // ── Comments ────────────────────────────────────────────────────────
+  // Comments for the currently-opened card, oldest first. Reset on each
+  // modal open. Comment ids are unique across the board so we key by id.
+  var commentsByCardId = 0;
+  var commentList = [];
+
+  function canModifyComment(comment) {
+    if (!currentUser.id) return false;
+    if (comment.authorUserId === currentUser.id) return true;
+    if (currentUser.isAdmin) return true;
+    return false;
+  }
+
+  function renderCommentBody(body, container) {
+    // Reuse the Markdown renderer for full block-level rendering inside
+    // the comment thread. Lists/headings are rare in comments but fine.
+    renderMarkdownInto(body, container);
+  }
+
+  function renderCommentNode(comment) {
+    var li = document.createElement('li');
+    li.className = 'kf-comment';
+    li.setAttribute('data-comment-id', String(comment.id));
+
+    var head = document.createElement('div');
+    head.className = 'kf-comment-head';
+
+    var author = document.createElement('span');
+    author.className = 'kf-comment-author';
+    author.textContent = comment.authorDisplayName || 'Unknown';
+    head.appendChild(author);
+
+    var time = document.createElement('span');
+    time.className = 'kf-comment-time';
+    time.textContent = relativeTime(comment.createdAt);
+    time.title = comment.createdAt || '';
+    head.appendChild(time);
+
+    if (comment.editedAt) {
+      var edited = document.createElement('span');
+      edited.className = 'kf-comment-edited';
+      edited.textContent = '(edited)';
+      edited.title = 'Edited ' + comment.editedAt;
+      head.appendChild(edited);
+    }
+
+    li.appendChild(head);
+
+    var body = document.createElement('div');
+    body.className = 'kf-comment-body';
+    renderCommentBody(comment.body, body);
+    li.appendChild(body);
+
+    if (canModifyComment(comment)) {
+      var actions = document.createElement('div');
+      actions.className = 'kf-comment-actions';
+      // Author may edit; admin-only deletes can't be edited (admin must
+      // delete + repost as themselves, matching the service contract).
+      if (comment.authorUserId === currentUser.id) {
+        var editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'kf-comment-action';
+        editBtn.textContent = 'Edit';
+        editBtn.addEventListener('click', function() { beginEditComment(comment.id); });
+        actions.appendChild(editBtn);
+      }
+      var delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'kf-comment-action';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', function() {
+        if (!confirm('Delete this comment? This cannot be undone.')) return;
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'delete_comment', id: comment.id });
+        send({ type: 'delete_comment', clientMsgId: cmid, id: comment.id });
+      });
+      actions.appendChild(delBtn);
+      li.appendChild(actions);
+    }
+
+    return li;
+  }
+
+  function beginEditComment(commentId) {
+    var comment = null;
+    for (var i = 0; i < commentList.length; i++) {
+      if (commentList[i].id === commentId) { comment = commentList[i]; break; }
+    }
+    if (!comment) return;
+    var li = commentsListEl.querySelector('[data-comment-id="' + commentId + '"]');
+    if (!li) return;
+    // Replace body + actions with an inline edit area; restore on save/cancel.
+    var bodyEl = li.querySelector('.kf-comment-body');
+    var actionsEl = li.querySelector('.kf-comment-actions');
+    if (bodyEl) bodyEl.style.display = 'none';
+    if (actionsEl) actionsEl.style.display = 'none';
+
+    var area = document.createElement('div');
+    area.className = 'kf-comment-edit-area';
+    var ta = document.createElement('textarea');
+    ta.rows = 3;
+    ta.maxLength = 5000;
+    ta.value = comment.body;
+    var btnRow = document.createElement('div');
+    btnRow.className = 'kf-comment-edit-actions';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', function() {
+      area.parentNode.removeChild(area);
+      if (bodyEl) bodyEl.style.display = '';
+      if (actionsEl) actionsEl.style.display = '';
+    });
+    var save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn-primary';
+    save.textContent = 'Save';
+    save.addEventListener('click', function() {
+      var body = ta.value.trim();
+      if (!body) return;
+      save.disabled = true;
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'update_comment', id: commentId });
+      send({ type: 'update_comment', clientMsgId: cmid, id: commentId, body: body });
+    });
+    btnRow.appendChild(cancel);
+    btnRow.appendChild(save);
+    area.appendChild(ta);
+    area.appendChild(btnRow);
+    li.appendChild(area);
+    ta.focus();
+  }
+
+  function renderCommentsList() {
+    while (commentsListEl.firstChild) commentsListEl.removeChild(commentsListEl.firstChild);
+    if (commentList.length === 0) {
+      commentsEmptyEl.hidden = false;
+      return;
+    }
+    commentsEmptyEl.hidden = true;
+    for (var i = 0; i < commentList.length; i++) {
+      commentsListEl.appendChild(renderCommentNode(commentList[i]));
+    }
+  }
+
+  function requestComments(cardId) {
+    commentsByCardId = cardId;
+    commentList = [];
+    renderCommentsList();
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_comments', cardId: cardId });
+    send({ type: 'list_comments', clientMsgId: cmid, cardId: cardId });
+  }
+
+  function postComment() {
+    if (!commentsByCardId) return;
+    var body = commentInputEl.value.trim();
+    if (!body) return;
+    commentPostBtn.disabled = true;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'create_comment', cardId: commentsByCardId });
+    var ok = send({ type: 'create_comment', clientMsgId: cmid, cardId: commentsByCardId, body: body });
+    if (!ok) {
+      commentPostBtn.disabled = false;
+      showToast('Disconnected — comment not sent.', 4000);
+    }
+  }
+
+  commentPostBtn.addEventListener('click', postComment);
+  commentInputEl.addEventListener('keydown', function(e) {
+    // Ctrl/Cmd+Enter to post — saves a click for keyboard-heavy users.
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      postComment();
+    }
+  });
 
   // ── Activity timeline ───────────────────────────────────────────────
   // Events for the currently-opened card, newest first. Reset every time
@@ -794,15 +1218,23 @@ const kanbanClientJs = `
     selectedGroups = [];
     renderSelectedGroups();
     groupsInput.value = '';
+    selectedAssignees = [];
+    renderSelectedAssignees();
+    assigneesInputEl.value = '';
     assignedInput.value = '';
     dueInput.value = '';
     notesInput.value = '';
     errorEl.hidden = true;
     archiveBtn.hidden = true;
     restoreBtn.hidden = true;
-    // No card id yet → no activity timeline to show.
+    // No card id yet → no activity timeline or comments to show.
     activitySectionEl.hidden = true;
     activityEvents = [];
+    commentsSectionEl.hidden = true;
+    commentList = [];
+    commentsByCardId = 0;
+    commentInputEl.value = '';
+    commentPostBtn.disabled = false;
     saveBtn.disabled = false;
     formEl.dataset.column = column;
     modalEl.hidden = false;
@@ -819,6 +1251,9 @@ const kanbanClientJs = `
     selectedGroups = Array.isArray(card.groups) ? card.groups.slice() : [];
     renderSelectedGroups();
     groupsInput.value = '';
+    selectedAssignees = Array.isArray(card.assignees) ? card.assignees.slice() : [];
+    renderSelectedAssignees();
+    assigneesInputEl.value = '';
     assignedInput.value = card.assigned || '';
     dueInput.value = card.dueDate || '';
     notesInput.value = card.notes || '';
@@ -827,8 +1262,12 @@ const kanbanClientJs = `
     // active cards; Restore only appears for archived ones.
     archiveBtn.hidden = editingArchived;
     restoreBtn.hidden = !editingArchived;
-    // Reveal the activity timeline and kick off a fetch for this card's
-    // events. The list renders empty while the request is in flight.
+    // Reveal comments + activity timeline and kick off fetches for this
+    // card. Both lists render empty while the requests are in flight.
+    commentsSectionEl.hidden = false;
+    commentInputEl.value = '';
+    commentPostBtn.disabled = false;
+    requestComments(id);
     activitySectionEl.hidden = false;
     requestCardEvents(id);
     saveBtn.disabled = false;
@@ -854,12 +1293,14 @@ const kanbanClientJs = `
 
   formEl.addEventListener('submit', function(e) {
     e.preventDefault();
-    // Fold any unsubmitted typed group into the chip list before saving.
+    // Fold any unsubmitted typed group / assignee into their chip lists.
     if (groupsInput.value.trim()) addGroupFromInput();
+    if (assigneesInputEl.value.trim()) addAssigneeFromInput();
     var title = titleInput.value.trim();
     if (!title) { showFormError('Task Name is required.'); return; }
     saveBtn.disabled = true;
     var cmid = nextClientMsgId();
+    var assigneeIds = selectedAssignees.map(function(a) { return a.userId; });
     if (editingCardId === null) {
       pendingClientMsgs.set(cmid, { type: 'create' });
       var ok = send({
@@ -868,6 +1309,7 @@ const kanbanClientJs = `
         column: formEl.dataset.column,
         title: title,
         groups: selectedGroups.slice(),
+        assigneeUserIds: assigneeIds,
         assigned: assignedInput.value.trim() || null,
         notes: notesInput.value.trim() || null,
         dueDate: dueInput.value || null,
@@ -887,6 +1329,7 @@ const kanbanClientJs = `
         patch: {
           title: title,
           groups: selectedGroups.slice(),
+          assigneeUserIds: assigneeIds,
           assigned: assignedInput.value.trim() || null,
           notes: notesInput.value.trim() || null,
           dueDate: dueInput.value || null,
@@ -1045,6 +1488,20 @@ const kanbanClientJs = `
         cards.clear();
         msg.cards.forEach(function(c) { cards.set(c.id, c); });
         renderAll();
+        // Deep-link from a notification: /kanban/<slug>?card=<id> auto-opens
+        // that card's modal as soon as the snapshot lands. One-shot — strip
+        // the query param so a refresh doesn't keep re-opening the modal.
+        try {
+          var qs = new URLSearchParams(location.search);
+          var deepCardId = parseInt(qs.get('card') || '', 10);
+          if (deepCardId && cards.has(deepCardId)) {
+            openEditModal(deepCardId, false);
+            qs.delete('card');
+            var newSearch = qs.toString();
+            history.replaceState(null, '',
+              location.pathname + (newSearch ? '?' + newSearch : '') + location.hash);
+          }
+        } catch (_err) { /* best-effort */ }
         return;
       case 'card_created':
         upsertCard(msg.card);
@@ -1128,6 +1585,40 @@ const kanbanClientJs = `
         // so unshift into the local list.
         activityEvents.unshift(msg.event);
         renderActivityInto();
+        return;
+      case 'comments_snapshot':
+        if (commentsByCardId !== msg.cardId) return;
+        commentList = (msg.comments || []).slice();
+        renderCommentsList();
+        return;
+      case 'comment_created':
+        // A comment may be created on any card; only render if the modal
+        // is showing that card. Append to thread (oldest-first ordering)
+        // and clear the composer if this client posted it.
+        if (!msg.comment || commentsByCardId !== msg.comment.cardId) return;
+        commentList.push(msg.comment);
+        renderCommentsList();
+        if (msg.comment.authorUserId === currentUser.id) {
+          commentInputEl.value = '';
+          commentPostBtn.disabled = false;
+          // Scroll the new comment into view inside the list.
+          commentsListEl.scrollTop = commentsListEl.scrollHeight;
+        }
+        return;
+      case 'comment_updated':
+        if (!msg.comment || commentsByCardId !== msg.comment.cardId) return;
+        for (var ci = 0; ci < commentList.length; ci++) {
+          if (commentList[ci].id === msg.comment.id) {
+            commentList[ci] = msg.comment;
+            break;
+          }
+        }
+        renderCommentsList();
+        return;
+      case 'comment_deleted':
+        if (commentsByCardId !== msg.cardId) return;
+        commentList = commentList.filter(function(c) { return c.id !== msg.id; });
+        renderCommentsList();
         return;
       case 'ack':
         pendingClientMsgs.delete(msg.clientMsgId);

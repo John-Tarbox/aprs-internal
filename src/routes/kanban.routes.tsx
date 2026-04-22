@@ -29,8 +29,10 @@ import {
   renameBoard,
   deleteBoard,
   getColumnCounts,
+  listActiveUserDirectory,
   listDistinctGroupNames,
 } from '../services/kanban.service';
+import { markNotificationsRead } from '../services/notifications.service';
 import { KANBAN_COLUMNS } from '../services/kanban.service';
 
 export const kanbanRoutes = new Hono<AppEnv>();
@@ -91,6 +93,38 @@ kanbanRoutes.post('/', requireRole('staff'), async (c) => {
   }
 });
 
+// ── Card deep-link redirector ───────────────────────────────────────────
+//
+// Notifications carry only the card id (the board may be renamed or moved).
+// This redirector resolves card → board slug and 302s to the board page,
+// optionally marking the source notification read in the same hop.
+kanbanRoutes.get('/c/:cardId', async (c) => {
+  const user = c.get('user');
+  const cardId = Number.parseInt(c.req.param('cardId'), 10);
+  if (!Number.isFinite(cardId) || cardId <= 0) {
+    return c.text('Invalid card id', 400);
+  }
+  const row = await c.env.DB
+    .prepare(
+      `SELECT b.slug FROM kanban_cards c
+       JOIN kanban_boards b ON b.id = c.board_id
+       WHERE c.id = ?`
+    )
+    .bind(cardId)
+    .first<{ slug: string }>();
+  if (!row) return c.text('Card not found', 404);
+
+  // Mark the originating notification read (best-effort) before redirecting.
+  const notifIdRaw = c.req.query('notif');
+  if (notifIdRaw) {
+    const nid = Number.parseInt(notifIdRaw, 10);
+    if (Number.isFinite(nid) && nid > 0) {
+      await markNotificationsRead(c.env.DB, user.id, [nid]).catch(() => {});
+    }
+  }
+  return c.redirect(`/kanban/${encodeURIComponent(row.slug)}?card=${cardId}`, 302);
+});
+
 // ── Board page ──────────────────────────────────────────────────────────
 
 kanbanRoutes.get('/:slug', async (c) => {
@@ -98,8 +132,18 @@ kanbanRoutes.get('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  const knownGroups = await listDistinctGroupNames(c.env.DB);
-  return c.html(<KanbanPage user={user} board={board} knownGroups={knownGroups} />);
+  const [knownGroups, knownUsers] = await Promise.all([
+    listDistinctGroupNames(c.env.DB),
+    listActiveUserDirectory(c.env.DB),
+  ]);
+  return c.html(
+    <KanbanPage
+      user={user}
+      board={board}
+      knownGroups={knownGroups}
+      knownUsers={knownUsers}
+    />
+  );
 });
 
 kanbanRoutes.get('/:slug/ws', async (c) => {
@@ -121,6 +165,9 @@ kanbanRoutes.get('/:slug/ws', async (c) => {
       'X-User-Id': String(user.id),
       'X-User-Email': user.email,
       'X-User-Display-Name': user.displayName ?? '',
+      // Forward admin status so the DO can authorize sensitive operations
+      // (e.g. deleting other users' comments) without a per-message DB hit.
+      'X-User-Is-Admin': user.roles.includes('admin') ? '1' : '0',
       'X-Board-Id': String(board.id),
     },
   });

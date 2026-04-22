@@ -155,6 +155,13 @@ export async function deleteBoard(db: D1Database, id: number): Promise<boolean> 
 
 // ── Card DTO ────────────────────────────────────────────────────────────
 
+/** Lightweight assignee — display info only, no role/email-domain detail. */
+export interface AssigneeDto {
+  userId: number;
+  displayName: string | null;
+  email: string;
+}
+
 export interface CardDto {
   id: number;
   boardId: number;
@@ -163,6 +170,9 @@ export interface CardDto {
   title: string;
   /** Zero or more group labels. Always an array; empty when unset. */
   groups: string[];
+  /** Multi-assignee FK list (S5). Empty when nobody is assigned. */
+  assignees: AssigneeDto[];
+  /** Legacy free-text assigned field (pre-S5). Retained alongside assignees. */
   assigned: string | null;
   notes: string | null;
   dueDate: string | null;
@@ -192,7 +202,11 @@ interface RawCardRow {
   updated_at: string;
 }
 
-function hydrateCard(row: RawCardRow, groups: string[]): CardDto {
+function hydrateCard(
+  row: RawCardRow,
+  groups: string[],
+  assignees: AssigneeDto[]
+): CardDto {
   return {
     id: row.id,
     boardId: row.board_id,
@@ -200,6 +214,7 @@ function hydrateCard(row: RawCardRow, groups: string[]): CardDto {
     position: row.position,
     title: row.title,
     groups,
+    assignees,
     assigned: row.assigned,
     notes: row.notes,
     dueDate: row.due_date,
@@ -239,6 +254,102 @@ async function loadGroupsForCards(
 async function loadGroupsForCard(db: D1Database, cardId: number): Promise<string[]> {
   const map = await loadGroupsForCards(db, [cardId]);
   return map.get(cardId) ?? [];
+}
+
+/** Bulk-fetch assignees for a set of cards. Returns map cardId -> AssigneeDto[]. */
+async function loadAssigneesForCards(
+  db: D1Database,
+  cardIds: number[]
+): Promise<Map<number, AssigneeDto[]>> {
+  const map = new Map<number, AssigneeDto[]>();
+  if (cardIds.length === 0) return map;
+  const placeholders = cardIds.map(() => '?').join(',');
+  const res = await db
+    .prepare(
+      `SELECT a.card_id, a.user_id, u.display_name, u.email
+       FROM kanban_card_assignees a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.card_id IN (${placeholders})
+       ORDER BY a.card_id ASC, u.display_name ASC, u.email ASC`
+    )
+    .bind(...cardIds)
+    .all<{ card_id: number; user_id: number; display_name: string | null; email: string }>();
+  for (const row of res.results ?? []) {
+    const dto: AssigneeDto = {
+      userId: row.user_id,
+      displayName: row.display_name,
+      email: row.email,
+    };
+    const list = map.get(row.card_id);
+    if (list) list.push(dto);
+    else map.set(row.card_id, [dto]);
+  }
+  return map;
+}
+
+async function loadAssigneesForCard(
+  db: D1Database,
+  cardId: number
+): Promise<AssigneeDto[]> {
+  const map = await loadAssigneesForCards(db, [cardId]);
+  return map.get(cardId) ?? [];
+}
+
+/**
+ * Replace a card's assignee set atomically. Filters userIds to active users
+ * only — silently drops invalid/inactive ids rather than failing the whole
+ * operation, matching how `setUserRoles` handles unknown role names.
+ */
+async function setCardAssignees(
+  db: D1Database,
+  cardId: number,
+  userIds: number[]
+): Promise<void> {
+  const unique = Array.from(new Set(userIds.filter((n) => Number.isFinite(n) && n > 0)));
+  // Validate ids against active users in one round-trip.
+  let validIds: number[] = [];
+  if (unique.length > 0) {
+    const res = await db
+      .prepare(
+        `SELECT id FROM users WHERE active = 1 AND id IN (${unique.map(() => '?').join(',')})`
+      )
+      .bind(...unique)
+      .all<{ id: number }>();
+    validIds = (res.results ?? []).map((r) => r.id);
+  }
+  const stmts = [
+    db.prepare(`DELETE FROM kanban_card_assignees WHERE card_id = ?`).bind(cardId),
+    ...validIds.map((uid) =>
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO kanban_card_assignees (card_id, user_id) VALUES (?, ?)`
+        )
+        .bind(cardId, uid)
+    ),
+  ];
+  await db.batch(stmts);
+}
+
+/**
+ * Active-user directory for the assignee picker. Lightweight projection —
+ * the picker only needs id, display name, and email. Sorted display-name
+ * first so the dropdown reads naturally.
+ */
+export async function listActiveUserDirectory(
+  db: D1Database
+): Promise<AssigneeDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT id, display_name, email FROM users
+       WHERE active = 1
+       ORDER BY display_name ASC, email ASC`
+    )
+    .all<{ id: number; display_name: string | null; email: string }>();
+  return (res.results ?? []).map((r) => ({
+    userId: r.id,
+    displayName: r.display_name,
+    email: r.email,
+  }));
 }
 
 /** Deduplicate + trim + drop empties, preserving first-seen casing. */
@@ -321,8 +432,14 @@ export async function listCards(
     .bind(boardId)
     .all<RawCardRow>();
   const rows = res.results ?? [];
-  const groups = await loadGroupsForCards(db, rows.map((r) => r.id));
-  return rows.map((r) => hydrateCard(r, groups.get(r.id) ?? []));
+  const ids = rows.map((r) => r.id);
+  const [groups, assignees] = await Promise.all([
+    loadGroupsForCards(db, ids),
+    loadAssigneesForCards(db, ids),
+  ]);
+  return rows.map((r) =>
+    hydrateCard(r, groups.get(r.id) ?? [], assignees.get(r.id) ?? [])
+  );
 }
 
 /**
@@ -341,14 +458,21 @@ export async function listArchivedCards(
     .bind(boardId)
     .all<RawCardRow>();
   const rows = res.results ?? [];
-  const groups = await loadGroupsForCards(db, rows.map((r) => r.id));
-  return rows.map((r) => hydrateCard(r, groups.get(r.id) ?? []));
+  const ids = rows.map((r) => r.id);
+  const [groups, assignees] = await Promise.all([
+    loadGroupsForCards(db, ids),
+    loadAssigneesForCards(db, ids),
+  ]);
+  return rows.map((r) =>
+    hydrateCard(r, groups.get(r.id) ?? [], assignees.get(r.id) ?? [])
+  );
 }
 
 export interface CreateCardInput {
   column: ColumnName;
   title: string;
   groups?: string[];
+  assigneeUserIds?: number[];
   assigned?: string | null;
   notes?: string | null;
   dueDate?: string | null;
@@ -404,13 +528,19 @@ export async function createCard(
       )
     );
   }
-  return hydrateCard(row, groups);
+  if (input.assigneeUserIds && input.assigneeUserIds.length > 0) {
+    await setCardAssignees(db, row.id, input.assigneeUserIds);
+  }
+  const assignees = await loadAssigneesForCard(db, row.id);
+  return hydrateCard(row, groups, assignees);
 }
 
 export interface UpdateCardPatch {
   title?: string;
   /** Undefined = don't touch groups. Array = replace the whole set (empty = remove all). */
   groups?: string[];
+  /** Undefined = don't touch assignees. Array = replace the whole set. */
+  assigneeUserIds?: number[];
   assigned?: string | null;
   notes?: string | null;
   dueDate?: string | null;
@@ -447,15 +577,19 @@ export async function updateCard(
   const normalizedGroups =
     patch.groups !== undefined ? normalizeGroups(patch.groups) : undefined;
 
-  // If nothing would change at all (no columns + no groups touched), return
-  // the current row at the expected version.
-  if (sets.length === 0 && normalizedGroups === undefined) {
+  // If nothing would change at all (no columns + no groups + no assignees
+  // touched), return the current row at the expected version.
+  if (sets.length === 0 && normalizedGroups === undefined && patch.assigneeUserIds === undefined) {
     const row = await db
       .prepare(`SELECT * FROM kanban_cards WHERE id = ? AND version = ?`)
       .bind(id, expectedVersion)
       .first<RawCardRow>();
     if (!row) return null;
-    return hydrateCard(row, await loadGroupsForCard(db, id));
+    return hydrateCard(
+      row,
+      await loadGroupsForCard(db, id),
+      await loadAssigneesForCard(db, id)
+    );
   }
 
   // Always bump version/updated_at when groups are touched, even if no scalar
@@ -491,12 +625,16 @@ export async function updateCard(
     ];
     await db.batch(stmts);
   }
+  if (patch.assigneeUserIds !== undefined) {
+    await setCardAssignees(db, id, patch.assigneeUserIds);
+  }
 
   const finalGroups =
     normalizedGroups !== undefined
       ? normalizedGroups
       : await loadGroupsForCard(db, id);
-  return hydrateCard(row, finalGroups);
+  const finalAssignees = await loadAssigneesForCard(db, id);
+  return hydrateCard(row, finalGroups, finalAssignees);
 }
 
 export interface AffectedPosition {
@@ -669,8 +807,9 @@ export async function moveCard(
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
   const movedGroups = await loadGroupsForCard(db, id);
+  const movedAssignees = await loadAssigneesForCard(db, id);
   return {
-    card: hydrateCard(movedRow, movedGroups),
+    card: hydrateCard(movedRow, movedGroups, movedAssignees),
     fromColumn,
     toColumn,
     affected: (affectedRows.results ?? []).map((r) => ({
@@ -791,7 +930,7 @@ export async function archiveCard(
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
   return {
-    card: hydrateCard(row, await loadGroupsForCard(db, id)),
+    card: hydrateCard(row, await loadGroupsForCard(db, id), await loadAssigneesForCard(db, id)),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
       id: r.id,
@@ -852,7 +991,7 @@ export async function unarchiveCard(
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
   return {
-    card: hydrateCard(row, await loadGroupsForCard(db, id)),
+    card: hydrateCard(row, await loadGroupsForCard(db, id), await loadAssigneesForCard(db, id)),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
       id: r.id,
@@ -983,4 +1122,172 @@ export async function listCardEvents(
     .bind(cardId, limit)
     .all<RawCardEventRow & { actor_display_name: string | null }>();
   return (res.results ?? []).map((r) => hydrateCardEvent(r, r.actor_display_name));
+}
+
+// ── Comments ────────────────────────────────────────────────────────────
+
+export interface CommentDto {
+  id: number;
+  cardId: number;
+  authorUserId: number | null;
+  authorDisplayName: string | null;
+  body: string;
+  /** ISO timestamp of the most recent edit; null if never edited. */
+  editedAt: string | null;
+  createdAt: string;
+}
+
+interface RawCommentRow {
+  id: number;
+  card_id: number;
+  author_user_id: number | null;
+  body: string;
+  edited_at: string | null;
+  created_at: string;
+}
+
+function hydrateComment(
+  row: RawCommentRow,
+  authorDisplayName: string | null
+): CommentDto {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    authorUserId: row.author_user_id,
+    authorDisplayName,
+    body: row.body,
+    editedAt: row.edited_at,
+    createdAt: row.created_at,
+  };
+}
+
+/** Oldest first — conventional thread order. */
+export async function listComments(
+  db: D1Database,
+  cardId: number
+): Promise<CommentDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT c.*, u.display_name as author_display_name
+       FROM kanban_card_comments c
+       LEFT JOIN users u ON u.id = c.author_user_id
+       WHERE c.card_id = ?
+       ORDER BY c.id ASC`
+    )
+    .bind(cardId)
+    .all<RawCommentRow & { author_display_name: string | null }>();
+  return (res.results ?? []).map((r) => hydrateComment(r, r.author_display_name));
+}
+
+export async function createComment(
+  db: D1Database,
+  cardId: number,
+  body: string,
+  userId: number | null
+): Promise<CommentDto> {
+  const trimmed = body.trim();
+  if (!trimmed) throw new Error('Comment body is required');
+  const row = await db
+    .prepare(
+      `INSERT INTO kanban_card_comments (card_id, author_user_id, body)
+       VALUES (?, ?, ?)
+       RETURNING *`
+    )
+    .bind(cardId, userId, trimmed)
+    .first<RawCommentRow>();
+  if (!row) throw new Error('Failed to insert comment');
+  // Resolve display name once for the broadcast payload — same pattern as
+  // logCardEvent. Avoids a second client round-trip to enrich the row.
+  let displayName: string | null = null;
+  if (userId !== null) {
+    const u = await db
+      .prepare(`SELECT display_name FROM users WHERE id = ?`)
+      .bind(userId)
+      .first<{ display_name: string | null }>();
+    displayName = u?.display_name ?? null;
+  }
+  return hydrateComment(row, displayName);
+}
+
+/**
+ * Edit a comment body. Only the original author may edit; everyone else
+ * (including admins) must delete-and-repost. Returns null when the
+ * caller isn't the author, the comment is missing, or the body is empty.
+ */
+export async function updateComment(
+  db: D1Database,
+  id: number,
+  body: string,
+  userId: number | null
+): Promise<CommentDto | null> {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  if (userId === null) return null;
+  const row = await db
+    .prepare(
+      `UPDATE kanban_card_comments
+       SET body = ?, edited_at = datetime('now')
+       WHERE id = ? AND author_user_id = ?
+       RETURNING *`
+    )
+    .bind(trimmed, id, userId)
+    .first<RawCommentRow>();
+  if (!row) return null;
+  const u = await db
+    .prepare(`SELECT display_name FROM users WHERE id = ?`)
+    .bind(userId)
+    .first<{ display_name: string | null }>();
+  return hydrateComment(row, u?.display_name ?? null);
+}
+
+export interface DeletedCommentRef {
+  id: number;
+  cardId: number;
+}
+
+/**
+ * Delete a comment. Author may delete their own; admins may delete any.
+ * Returns the (id, cardId) of the deleted row so the caller can broadcast
+ * a precise removal, or null if no row matched the auth predicate.
+ */
+export async function deleteComment(
+  db: D1Database,
+  id: number,
+  userId: number | null,
+  isAdmin: boolean
+): Promise<DeletedCommentRef | null> {
+  if (userId === null && !isAdmin) return null;
+  const row = isAdmin
+    ? await db
+        .prepare(
+          `DELETE FROM kanban_card_comments WHERE id = ? RETURNING id, card_id`
+        )
+        .bind(id)
+        .first<{ id: number; card_id: number }>()
+    : await db
+        .prepare(
+          `DELETE FROM kanban_card_comments
+           WHERE id = ? AND author_user_id = ?
+           RETURNING id, card_id`
+        )
+        .bind(id, userId)
+        .first<{ id: number; card_id: number }>();
+  return row ? { id: row.id, cardId: row.card_id } : null;
+}
+
+/** Look up a single comment (for authorization / refetch flows). */
+export async function getComment(
+  db: D1Database,
+  id: number
+): Promise<CommentDto | null> {
+  const row = await db
+    .prepare(
+      `SELECT c.*, u.display_name as author_display_name
+       FROM kanban_card_comments c
+       LEFT JOIN users u ON u.id = c.author_user_id
+       WHERE c.id = ?`
+    )
+    .bind(id)
+    .first<RawCommentRow & { author_display_name: string | null }>();
+  return row ? hydrateComment(row, row.author_display_name) : null;
 }

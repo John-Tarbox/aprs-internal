@@ -22,24 +22,35 @@ import {
   KANBAN_COLUMNS,
   archiveCard,
   createCard,
+  createComment,
   deleteCard,
+  deleteComment,
+  getComment,
+  listActiveUserDirectory,
   listArchivedCards,
   listCardEvents,
   listCards,
+  listComments,
   logCardEvent,
   moveCard,
   unarchiveCard,
   updateCard,
+  updateComment,
   type CardDto,
   type CardEventDto,
   type ColumnName,
 } from '../services/kanban.service';
+import {
+  createNotification,
+  parseMentions,
+} from '../services/notifications.service';
 
 const MAX_MSG_PER_SEC = 20;
 const RATE_WINDOW_MS = 1000;
 const MAX_TITLE = 200;
 const MAX_FIELD = 100;
 const MAX_NOTES = 10_000;
+const MAX_COMMENT = 5_000;
 
 const columnEnum = z.enum(KANBAN_COLUMNS);
 
@@ -68,6 +79,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     column: columnEnum,
     title: z.string().min(1).max(MAX_TITLE),
     groups: z.array(z.string().trim().max(MAX_FIELD)).max(20).optional(),
+    assigneeUserIds: z.array(z.number().int().positive()).max(10).optional(),
     assigned: nullableStr(MAX_FIELD),
     notes: nullableStr(MAX_NOTES),
     dueDate: dueDateSchema,
@@ -80,6 +92,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     patch: z.object({
       title: z.string().min(1).max(MAX_TITLE).optional(),
       groups: z.array(z.string().trim().max(MAX_FIELD)).max(20).optional(),
+      assigneeUserIds: z.array(z.number().int().positive()).max(10).optional(),
       assigned: nullableStr(MAX_FIELD),
       notes: nullableStr(MAX_NOTES),
       dueDate: dueDateSchema,
@@ -124,6 +137,30 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     cardId: z.number().int().positive(),
   }),
+  z.object({
+    // Comments thread snapshot for a card (modal open). DO replies with
+    // { type: 'comments_snapshot', cardId, comments }.
+    type: z.literal('list_comments'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('create_comment'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
+    body: z.string().min(1).max(MAX_COMMENT),
+  }),
+  z.object({
+    type: z.literal('update_comment'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+    body: z.string().min(1).max(MAX_COMMENT),
+  }),
+  z.object({
+    type: z.literal('delete_comment'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+  }),
 ]);
 
 type ClientMsg = z.infer<typeof clientMsgSchema>;
@@ -132,6 +169,11 @@ interface SocketAttachment {
   userId: number;
   email: string;
   displayName: string | null;
+  // Whether the user holds the 'admin' role. Cached on the socket so
+  // authorization checks (e.g., "can this user delete anyone's comment")
+  // don't need a DB hit per message. The route reads roles from the
+  // session-resolved AuthUser and forwards via X-User-Is-Admin header.
+  isAdmin: boolean;
   // Which board this socket is connected to. Each DO instance is per-board
   // (idFromName('board-' + id)), but we also store it on the attachment so
   // service calls can pass it explicitly rather than relying on DO-internal
@@ -156,6 +198,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
     const email = request.headers.get('X-User-Email');
     const displayName = request.headers.get('X-User-Display-Name');
     const boardIdRaw = request.headers.get('X-Board-Id');
+    const isAdminRaw = request.headers.get('X-User-Is-Admin');
     const userId = userIdRaw ? Number.parseInt(userIdRaw, 10) : NaN;
     const boardId = boardIdRaw ? Number.parseInt(boardIdRaw, 10) : NaN;
     if (!Number.isFinite(userId) || userId <= 0 || !email) {
@@ -176,6 +219,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
       userId,
       email,
       displayName: displayName || null,
+      isAdmin: isAdminRaw === '1',
       boardId,
       recentMs: [],
     };
@@ -233,6 +277,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
               column: parsed.column,
               title: parsed.title,
               groups: parsed.groups,
+              assigneeUserIds: parsed.assigneeUserIds,
               assigned: parsed.assigned ?? null,
               notes: parsed.notes ?? null,
               dueDate: parsed.dueDate ?? null,
@@ -244,10 +289,33 @@ export class KanbanBoardDO extends DurableObject<Env> {
             column: card.column,
             position: card.position,
           });
+          // New card → every assignee is "newly assigned" relative to the
+          // (empty) prior state.
+          await this.fanOutAssignmentNotifications(
+            card.id,
+            attachment.userId,
+            [],
+            card.assignees.map((a) => a.userId),
+            card.title
+          );
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'update_card': {
+          // Capture the prior assignee set before the update so we can
+          // diff and only notify newly-added users (not everyone in the
+          // post-update set, which would re-notify on every edit).
+          let priorAssigneeIds: number[] | null = null;
+          if (parsed.patch.assigneeUserIds !== undefined) {
+            const before = await this.env.DB
+              .prepare(
+                `SELECT user_id FROM kanban_card_assignees WHERE card_id = ?`
+              )
+              .bind(parsed.id)
+              .all<{ user_id: number }>();
+            priorAssigneeIds = (before.results ?? []).map((r) => r.user_id);
+          }
+
           const updated = await updateCard(
             this.env.DB,
             parsed.id,
@@ -271,6 +339,15 @@ export class KanbanBoardDO extends DurableObject<Env> {
           const changedFields = Object.keys(parsed.patch);
           if (changedFields.length > 0) {
             await this.emitCardEvent(updated.id, attachment.userId, 'card.updated', { changedFields });
+          }
+          if (priorAssigneeIds !== null) {
+            await this.fanOutAssignmentNotifications(
+              updated.id,
+              attachment.userId,
+              priorAssigneeIds,
+              updated.assignees.map((a) => a.userId),
+              updated.title
+            );
           }
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
@@ -407,6 +484,102 @@ export class KanbanBoardDO extends DurableObject<Env> {
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
+        case 'list_comments': {
+          const comments = await listComments(this.env.DB, parsed.cardId);
+          this.sendTo(ws, {
+            type: 'comments_snapshot',
+            cardId: parsed.cardId,
+            comments,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'create_comment': {
+          const comment = await createComment(
+            this.env.DB,
+            parsed.cardId,
+            parsed.body,
+            attachment.userId
+          );
+          this.broadcast({ type: 'comment_created', comment });
+          // Mirror to the activity timeline so the same modal section that
+          // already shows other events surfaces "X commented" as well.
+          await this.emitCardEvent(parsed.cardId, attachment.userId, 'card.updated', {
+            changedFields: ['comments'],
+            commentId: comment.id,
+          });
+          // Fan out @mention notifications. We need the card's title for the
+          // notification snippet — single point query keeps the read cheap.
+          const titleRow = await this.env.DB
+            .prepare(`SELECT title FROM kanban_cards WHERE id = ?`)
+            .bind(parsed.cardId)
+            .first<{ title: string }>();
+          await this.fanOutMentionNotifications(
+            parsed.body,
+            attachment.userId,
+            parsed.cardId,
+            comment.id,
+            titleRow?.title ?? null
+          );
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'update_comment': {
+          const updated = await updateComment(
+            this.env.DB,
+            parsed.id,
+            parsed.body,
+            attachment.userId
+          );
+          if (!updated) {
+            // No row matched the (id, author_user_id) predicate — either the
+            // comment doesn't exist or this user isn't the author.
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'not_found',
+            });
+            return;
+          }
+          this.broadcast({ type: 'comment_updated', comment: updated });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'delete_comment': {
+          // Look up first so we can broadcast cardId even when the row vanishes
+          // from the predicate-matched DELETE (admin path doesn't read it back).
+          const existing = await getComment(this.env.DB, parsed.id);
+          if (!existing) {
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'not_found',
+            });
+            return;
+          }
+          const ref = await deleteComment(
+            this.env.DB,
+            parsed.id,
+            attachment.userId,
+            attachment.isAdmin
+          );
+          if (!ref) {
+            // Authorization check failed — caller is neither author nor admin.
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: 'forbidden',
+            });
+            return;
+          }
+          this.broadcast({
+            type: 'comment_deleted',
+            id: ref.id,
+            cardId: ref.cardId,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
       }
     } catch (err) {
       console.error('kanban DO message error:', err);
@@ -429,6 +602,71 @@ export class KanbanBoardDO extends DurableObject<Env> {
 
   async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
     console.error('kanban DO websocket error:', error);
+  }
+
+  /**
+   * Insert in-app notifications for users mentioned in a comment body.
+   * Self-mentions are skipped (the actor doesn't notify themselves).
+   * Errors are swallowed for the same reason as emitCardEvent — we don't
+   * want notification failures to mask the comment write itself.
+   */
+  private async fanOutMentionNotifications(
+    body: string,
+    actorUserId: number,
+    cardId: number,
+    commentId: number,
+    cardTitle: string | null
+  ): Promise<void> {
+    try {
+      const directory = await listActiveUserDirectory(this.env.DB);
+      const userIds = parseMentions(
+        body,
+        directory.map((u) => ({ userId: u.userId, email: u.email }))
+      );
+      for (const uid of userIds) {
+        if (uid === actorUserId) continue;
+        await createNotification(this.env.DB, {
+          userId: uid,
+          kind: 'mention.comment',
+          cardId,
+          commentId,
+          actorUserId,
+          metadata: { cardTitle: cardTitle ?? undefined },
+        });
+      }
+    } catch (err) {
+      console.error('fanOutMentionNotifications failed:', err);
+    }
+  }
+
+  /**
+   * Insert assignment notifications for users newly added to a card's
+   * assignee set. `previousIds` is the pre-mutation set; we diff against
+   * `currentIds` and notify only the additions. Self-assignments don't
+   * notify the actor.
+   */
+  private async fanOutAssignmentNotifications(
+    cardId: number,
+    actorUserId: number,
+    previousIds: number[],
+    currentIds: number[],
+    cardTitle: string | null
+  ): Promise<void> {
+    try {
+      const prev = new Set(previousIds);
+      const added = currentIds.filter((id) => !prev.has(id) && id !== actorUserId);
+      for (const uid of added) {
+        await createNotification(this.env.DB, {
+          userId: uid,
+          kind: 'card.assigned',
+          cardId,
+          actorUserId,
+          metadata: { cardTitle: cardTitle ?? undefined },
+        });
+      }
+    } catch (err) {
+      console.error('fanOutAssignmentNotifications failed:', err);
+    }
   }
 
   /**

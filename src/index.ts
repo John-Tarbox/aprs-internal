@@ -18,6 +18,7 @@ import { authRoutes } from './routes/auth.routes';
 import { publicPageRoutes, authedPageRoutes } from './routes/page.routes';
 import { adminRoutes } from './routes/admin.routes';
 import { kanbanRoutes } from './routes/kanban.routes';
+import { notificationsRoutes } from './routes/notifications.routes';
 import { authMiddleware, requireRole } from './middleware/auth';
 
 // Re-exported at module level so the Workers runtime can find the class
@@ -40,6 +41,7 @@ app.use('/admin/*', requireRole('admin'));
 app.route('/admin', adminRoutes);
 
 app.route('/kanban', kanbanRoutes);
+app.route('/api/notifications', notificationsRoutes);
 
 app.route('/', authedPageRoutes);      // /
 
