@@ -166,6 +166,8 @@ export interface CardDto {
   assigned: string | null;
   notes: string | null;
   dueDate: string | null;
+  /** ISO timestamp when the card was archived (soft-deleted); null when active. */
+  archivedAt: string | null;
   version: number;
   createdByUserId: number | null;
   updatedByUserId: number | null;
@@ -182,6 +184,7 @@ interface RawCardRow {
   assigned: string | null;
   notes: string | null;
   due_date: string | null;
+  archived_at: string | null;
   version: number;
   created_by_user_id: number | null;
   updated_by_user_id: number | null;
@@ -200,6 +203,7 @@ function hydrateCard(row: RawCardRow, groups: string[]): CardDto {
     assigned: row.assigned,
     notes: row.notes,
     dueDate: row.due_date,
+    archivedAt: row.archived_at,
     version: row.version,
     createdByUserId: row.created_by_user_id,
     updatedByUserId: row.updated_by_user_id,
@@ -279,14 +283,19 @@ export async function getColumnCounts(
     },
     {} as Record<ColumnName, number>
   );
+  // Archived cards never count toward column totals — they're hidden from the
+  // primary board and the home-tile "work remaining" number.
   const res = boardId === undefined
     ? await db
-        .prepare(`SELECT column_name, COUNT(*) as c FROM kanban_cards GROUP BY column_name`)
+        .prepare(
+          `SELECT column_name, COUNT(*) as c FROM kanban_cards
+           WHERE archived_at IS NULL GROUP BY column_name`
+        )
         .all<{ column_name: ColumnName; c: number }>()
     : await db
         .prepare(
           `SELECT column_name, COUNT(*) as c FROM kanban_cards
-           WHERE board_id = ? GROUP BY column_name`
+           WHERE board_id = ? AND archived_at IS NULL GROUP BY column_name`
         )
         .bind(boardId)
         .all<{ column_name: ColumnName; c: number }>();
@@ -296,14 +305,38 @@ export async function getColumnCounts(
   return zeroed;
 }
 
+/**
+ * Active cards on a board (archived excluded). The board view uses this for
+ * its snapshot — archived cards load on demand via listArchivedCards().
+ */
 export async function listCards(
   db: D1Database,
   boardId: number
 ): Promise<CardDto[]> {
   const res = await db
     .prepare(
-      `SELECT * FROM kanban_cards WHERE board_id = ?
+      `SELECT * FROM kanban_cards WHERE board_id = ? AND archived_at IS NULL
        ORDER BY column_name ASC, position ASC, id ASC`
+    )
+    .bind(boardId)
+    .all<RawCardRow>();
+  const rows = res.results ?? [];
+  const groups = await loadGroupsForCards(db, rows.map((r) => r.id));
+  return rows.map((r) => hydrateCard(r, groups.get(r.id) ?? []));
+}
+
+/**
+ * Archived cards on a board, most recently archived first. Loaded on demand
+ * when the user opens the archive drawer — keeps the main snapshot small.
+ */
+export async function listArchivedCards(
+  db: D1Database,
+  boardId: number
+): Promise<CardDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT * FROM kanban_cards WHERE board_id = ? AND archived_at IS NOT NULL
+       ORDER BY archived_at DESC, id DESC`
     )
     .bind(boardId)
     .all<RawCardRow>();
@@ -328,7 +361,9 @@ export async function createCard(
   userId: number | null
 ): Promise<CardDto> {
   const groups = normalizeGroups(input.groups);
-  // Append to the end of the target column on this board.
+  // Append to the end of the target column on this board. MAX(position)
+  // must only consider active (non-archived) cards — archived rows carry
+  // position = -1 as a sentinel and must not influence new-card placement.
   const row = await db
     .prepare(
       `INSERT INTO kanban_cards
@@ -338,7 +373,7 @@ export async function createCard(
          ?,
          ?,
          (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
-           WHERE board_id = ? AND column_name = ?),
+           WHERE board_id = ? AND column_name = ? AND archived_at IS NULL),
          ?, ?, ?, ?, ?, ?
        )
        RETURNING *`
@@ -497,21 +532,26 @@ export async function moveCard(
 ): Promise<MoveResult | null> {
   const current = await db
     .prepare(
-      `SELECT board_id, column_name, position, version FROM kanban_cards WHERE id = ?`
+      `SELECT board_id, column_name, position, version, archived_at
+         FROM kanban_cards WHERE id = ?`
     )
     .bind(id)
-    .first<{ board_id: number; column_name: ColumnName; position: number; version: number }>();
+    .first<{ board_id: number; column_name: ColumnName; position: number; version: number; archived_at: string | null }>();
   if (!current) return null;
   if (current.version !== expectedVersion) return null;
+  // Archived cards are not on the board; refuse to move them.
+  if (current.archived_at) return null;
 
   const boardId = current.board_id;
   const fromColumn = current.column_name;
   const fromPosition = current.position;
 
   // Clamp toPosition into the valid range for the destination (board, column).
+  // Only active cards count — archived rows sit outside the position ordering.
   const countRow = await db
     .prepare(
-      `SELECT COUNT(*) as c FROM kanban_cards WHERE board_id = ? AND column_name = ?`
+      `SELECT COUNT(*) as c FROM kanban_cards
+         WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
     )
     .bind(boardId, toColumn)
     .first<{ c: number }>();
@@ -539,7 +579,8 @@ export async function moveCard(
         db
           .prepare(
             `UPDATE kanban_cards SET position = position - 1
-             WHERE board_id = ? AND column_name = ? AND position > ? AND position <= ?`
+             WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+               AND position > ? AND position <= ?`
           )
           .bind(boardId, fromColumn, fromPosition, effectiveToPos)
       );
@@ -558,7 +599,8 @@ export async function moveCard(
         db
           .prepare(
             `UPDATE kanban_cards SET position = position + 1
-             WHERE board_id = ? AND column_name = ? AND position >= ? AND position < ?`
+             WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+               AND position >= ? AND position < ?`
           )
           .bind(boardId, fromColumn, effectiveToPos, fromPosition)
       );
@@ -575,12 +617,14 @@ export async function moveCard(
     }
   } else {
     // Cross-column: close gap in source, open gap in target, then relocate.
-    // Both writes are scoped to this board.
+    // Both writes are scoped to this board. Archived rows are excluded from
+    // position shifts — their position is a -1 sentinel outside the ordering.
     stmts.push(
       db
         .prepare(
           `UPDATE kanban_cards SET position = position - 1
-           WHERE board_id = ? AND column_name = ? AND position > ?`
+           WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+             AND position > ?`
         )
         .bind(boardId, fromColumn, fromPosition)
     );
@@ -588,7 +632,8 @@ export async function moveCard(
       db
         .prepare(
           `UPDATE kanban_cards SET position = position + 1
-           WHERE board_id = ? AND column_name = ? AND position >= ?`
+           WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+             AND position >= ?`
         )
         .bind(boardId, toColumn, effectiveToPos)
     );
@@ -617,7 +662,8 @@ export async function moveCard(
   const affectedRows = await db
     .prepare(
       `SELECT id, column_name, position, version FROM kanban_cards
-       WHERE board_id = ? AND column_name IN (${affectedCols.map(() => '?').join(',')})`
+       WHERE board_id = ? AND archived_at IS NULL
+         AND column_name IN (${affectedCols.map(() => '?').join(',')})`
     )
     .bind(boardId, ...affectedCols)
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
@@ -636,7 +682,14 @@ export async function moveCard(
   };
 }
 
-/** Returns true on success, false on version conflict / not found. */
+/**
+ * Hard-delete a card (destructive; retained for completeness but not wired
+ * into the UI — the board uses `archiveCard` as its primary destructive
+ * action). Returns true on success, false on version conflict / not found.
+ *
+ * If the card is already archived its position is -1 and no gap needs to
+ * close; otherwise shift the later cards in its column down by one.
+ */
 export async function deleteCard(
   db: D1Database,
   id: number,
@@ -644,23 +697,290 @@ export async function deleteCard(
 ): Promise<boolean> {
   const current = await db
     .prepare(
-      `SELECT board_id, column_name, position, version FROM kanban_cards WHERE id = ?`
+      `SELECT board_id, column_name, position, version, archived_at
+         FROM kanban_cards WHERE id = ?`
     )
     .bind(id)
-    .first<{ board_id: number; column_name: ColumnName; position: number; version: number }>();
+    .first<{ board_id: number; column_name: ColumnName; position: number; version: number; archived_at: string | null }>();
   if (!current || current.version !== expectedVersion) return false;
 
-  await db.batch([
+  const stmts = [
     db
       .prepare(`DELETE FROM kanban_cards WHERE id = ? AND version = ?`)
       .bind(id, expectedVersion),
+  ];
+  if (!current.archived_at) {
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE kanban_cards SET position = position - 1
+           WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+             AND position > ?`
+        )
+        .bind(current.board_id, current.column_name, current.position)
+    );
+  }
+  await db.batch(stmts);
+
+  return true;
+}
+
+export interface ArchiveResult {
+  card: CardDto;
+  column: ColumnName;
+  /** Post-archive positions of the remaining active cards in the affected column. */
+  affected: AffectedPosition[];
+}
+
+/**
+ * Archive (soft-delete) a card. The row is retained with a non-null
+ * `archived_at` timestamp and its position is set to -1 (sentinel, outside
+ * the dense ordering). Later active cards in the same column shift down
+ * to close the gap.
+ *
+ * Returns null on version conflict, missing card, or already-archived.
+ */
+export async function archiveCard(
+  db: D1Database,
+  id: number,
+  expectedVersion: number,
+  userId: number | null
+): Promise<ArchiveResult | null> {
+  const current = await db
+    .prepare(
+      `SELECT board_id, column_name, position, version, archived_at
+         FROM kanban_cards WHERE id = ?`
+    )
+    .bind(id)
+    .first<{ board_id: number; column_name: ColumnName; position: number; version: number; archived_at: string | null }>();
+  if (!current) return null;
+  if (current.version !== expectedVersion) return null;
+  if (current.archived_at) return null;
+
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE kanban_cards
+         SET archived_at = datetime('now'), position = -1,
+             version = version + 1, updated_at = datetime('now'),
+             updated_by_user_id = ?
+         WHERE id = ? AND version = ?`
+      )
+      .bind(userId, id, expectedVersion),
     db
       .prepare(
         `UPDATE kanban_cards SET position = position - 1
-         WHERE board_id = ? AND column_name = ? AND position > ?`
+         WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+           AND position > ?`
       )
       .bind(current.board_id, current.column_name, current.position),
   ]);
 
-  return true;
+  const row = await db
+    .prepare(`SELECT * FROM kanban_cards WHERE id = ?`)
+    .bind(id)
+    .first<RawCardRow>();
+  if (!row) return null;
+
+  const affectedRows = await db
+    .prepare(
+      `SELECT id, column_name, position, version FROM kanban_cards
+       WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
+    )
+    .bind(current.board_id, current.column_name)
+    .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
+
+  return {
+    card: hydrateCard(row, await loadGroupsForCard(db, id)),
+    column: current.column_name,
+    affected: (affectedRows.results ?? []).map((r) => ({
+      id: r.id,
+      column: r.column_name,
+      position: r.position,
+      version: r.version,
+    })),
+  };
+}
+
+/**
+ * Restore a previously-archived card. It returns to the end of its original
+ * column. Returns null on version conflict, missing card, or not-archived.
+ */
+export async function unarchiveCard(
+  db: D1Database,
+  id: number,
+  expectedVersion: number,
+  userId: number | null
+): Promise<ArchiveResult | null> {
+  const current = await db
+    .prepare(
+      `SELECT board_id, column_name, version, archived_at
+         FROM kanban_cards WHERE id = ?`
+    )
+    .bind(id)
+    .first<{ board_id: number; column_name: ColumnName; version: number; archived_at: string | null }>();
+  if (!current) return null;
+  if (current.version !== expectedVersion) return null;
+  if (!current.archived_at) return null;
+
+  await db
+    .prepare(
+      `UPDATE kanban_cards
+       SET archived_at = NULL,
+           position = (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
+                        WHERE board_id = ? AND column_name = ? AND archived_at IS NULL),
+           version = version + 1,
+           updated_at = datetime('now'),
+           updated_by_user_id = ?
+       WHERE id = ? AND version = ?`
+    )
+    .bind(current.board_id, current.column_name, userId, id, expectedVersion)
+    .run();
+
+  const row = await db
+    .prepare(`SELECT * FROM kanban_cards WHERE id = ?`)
+    .bind(id)
+    .first<RawCardRow>();
+  if (!row) return null;
+
+  const affectedRows = await db
+    .prepare(
+      `SELECT id, column_name, position, version FROM kanban_cards
+       WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
+    )
+    .bind(current.board_id, current.column_name)
+    .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
+
+  return {
+    card: hydrateCard(row, await loadGroupsForCard(db, id)),
+    column: current.column_name,
+    affected: (affectedRows.results ?? []).map((r) => ({
+      id: r.id,
+      column: r.column_name,
+      position: r.position,
+      version: r.version,
+    })),
+  };
+}
+
+// ── Card events (per-card activity log) ─────────────────────────────────
+
+/**
+ * Known event kinds. Not a DB CHECK constraint — new kinds can be added by
+ * the application without a migration — but TypeScript enforces the shape
+ * at the call sites. Expands over time as new features ship (comments,
+ * assignees, etc.).
+ */
+export type CardEventKind =
+  | 'card.created'
+  | 'card.updated'
+  | 'card.moved'
+  | 'card.archived'
+  | 'card.unarchived'
+  | 'card.deleted';
+
+export interface CardEventDto {
+  id: number;
+  cardId: number;
+  actorUserId: number | null;
+  /** Actor display name, resolved at list time from users.display_name. */
+  actorDisplayName: string | null;
+  kind: CardEventKind | string;
+  /** Parsed JSON metadata; null when the kind carries no payload. */
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+interface RawCardEventRow {
+  id: number;
+  card_id: number;
+  actor_user_id: number | null;
+  kind: string;
+  metadata: string | null;
+  created_at: string;
+}
+
+function parseEventMetadata(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function hydrateCardEvent(
+  row: RawCardEventRow,
+  actorDisplayName: string | null
+): CardEventDto {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    actorUserId: row.actor_user_id,
+    actorDisplayName,
+    kind: row.kind,
+    metadata: parseEventMetadata(row.metadata),
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Append a row to the per-card activity log. Returns the freshly-inserted
+ * event (with its id + created_at) so the DO can broadcast it without a
+ * second round-trip. `actorDisplayName` is resolved here so broadcast
+ * payloads don't need the client to maintain a user directory.
+ */
+export async function logCardEvent(
+  db: D1Database,
+  input: {
+    cardId: number;
+    userId: number | null;
+    kind: CardEventKind;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<CardEventDto> {
+  const metaJson = input.metadata ? JSON.stringify(input.metadata) : null;
+  const row = await db
+    .prepare(
+      `INSERT INTO kanban_card_events (card_id, actor_user_id, kind, metadata)
+       VALUES (?, ?, ?, ?) RETURNING *`
+    )
+    .bind(input.cardId, input.userId, input.kind, metaJson)
+    .first<RawCardEventRow>();
+  if (!row) throw new Error('Failed to insert card event');
+
+  let actorDisplayName: string | null = null;
+  if (input.userId !== null) {
+    const u = await db
+      .prepare(`SELECT display_name FROM users WHERE id = ?`)
+      .bind(input.userId)
+      .first<{ display_name: string | null }>();
+    actorDisplayName = u?.display_name ?? null;
+  }
+  return hydrateCardEvent(row, actorDisplayName);
+}
+
+/**
+ * Return the most recent events for a card (newest first), up to `limit`.
+ * Actor display names are resolved in the same query via LEFT JOIN so a
+ * user who's been renamed since the event fired shows their current name.
+ */
+export async function listCardEvents(
+  db: D1Database,
+  cardId: number,
+  limit = 50
+): Promise<CardEventDto[]> {
+  const res = await db
+    .prepare(
+      `SELECT e.*, u.display_name as actor_display_name
+       FROM kanban_card_events e
+       LEFT JOIN users u ON u.id = e.actor_user_id
+       WHERE e.card_id = ?
+       ORDER BY e.id DESC
+       LIMIT ?`
+    )
+    .bind(cardId, limit)
+    .all<RawCardEventRow & { actor_display_name: string | null }>();
+  return (res.results ?? []).map((r) => hydrateCardEvent(r, r.actor_display_name));
 }

@@ -40,6 +40,9 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
         <a class="kanban-back" href="/kanban" aria-label="Back to board list">← All boards</a>
         <h1>{board.name}</h1>
         <span id="kanban-status" class="kanban-status kanban-status-pending">Connecting…</span>
+        <button id="kanban-archive-toggle" class="btn kanban-archive-toggle" type="button" aria-expanded="false">
+          Show archived
+        </button>
       </div>
 
       <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
@@ -53,6 +56,15 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
           </section>
         ))}
       </div>
+
+      <section id="kanban-archive" class="kanban-archive" hidden aria-label="Archived cards">
+        <header class="kanban-archive-head">
+          <h2>Archived cards</h2>
+          <span id="kanban-archive-count" class="kanban-archive-count"></span>
+        </header>
+        <div id="kanban-archive-body" class="kanban-archive-body"></div>
+        <p id="kanban-archive-empty" class="kanban-archive-empty" hidden>No archived cards on this board.</p>
+      </section>
 
       <div id="kanban-modal" class="kanban-modal" hidden>
         <div class="kanban-modal-inner">
@@ -80,11 +92,18 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) =>
             </label>
             <label>Notes
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
+              <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
             </label>
+            <section id="kf-activity" class="kf-activity" hidden aria-label="Activity timeline">
+              <h3 class="kf-activity-title">Activity</h3>
+              <ol id="kf-activity-list" class="kf-activity-list"></ol>
+              <p id="kf-activity-empty" class="kf-activity-empty" hidden>No activity yet.</p>
+            </section>
             <p id="kf-error" class="kanban-error" hidden></p>
             <div class="kanban-modal-actions">
               <button type="button" id="kf-cancel" class="btn">Cancel</button>
-              <button type="button" id="kf-delete" class="btn kanban-btn-danger" hidden>Delete</button>
+              <button type="button" id="kf-archive" class="btn kanban-btn-danger" hidden>Archive</button>
+              <button type="button" id="kf-restore" class="btn" hidden>Restore</button>
               <button type="submit" id="kf-save" class="btn btn-primary">Save</button>
             </div>
           </form>
@@ -169,6 +188,46 @@ const kanbanCss = `
   .kanban-chip { background: rgba(128,128,128,0.15); padding: 1px 6px; border-radius: 999px; }
   .kanban-card-notes { margin-top: 4px; font-size: 0.85em; opacity: 0.75;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  /* Markdown-rendered content inside notes preview. Aggressive resets so the
+     rendered blocks stay compact inside the 2-line clamp. */
+  .kanban-card-notes p,
+  .kanban-card-notes ul,
+  .kanban-card-notes ol { margin: 0; padding: 0; }
+  .kanban-card-notes ul,
+  .kanban-card-notes ol { padding-left: 1.1em; }
+  .kanban-card-notes h1,
+  .kanban-card-notes h2,
+  .kanban-card-notes h3,
+  .kanban-card-notes h4,
+  .kanban-card-notes h5,
+  .kanban-card-notes h6 { margin: 0; font-size: 1em; font-weight: 700; }
+  .kanban-card-notes code {
+    background: rgba(128,128,128,0.15); padding: 0 3px; border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.95em;
+  }
+  .kanban-card-notes a { color: inherit; text-decoration: underline; }
+  .kf-notes-hint {
+    display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
+  }
+
+  /* Activity timeline in the card modal. */
+  .kf-activity { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-activity[hidden] { display: none; }
+  .kf-activity-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-activity-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 6px;
+    max-height: 200px; overflow-y: auto;
+  }
+  .kf-activity-item {
+    font-size: 0.85em; line-height: 1.35;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px;
+  }
+  .kf-activity-actor { font-weight: 600; }
+  .kf-activity-desc { opacity: 0.85; }
+  .kf-activity-time { opacity: 0.6; font-size: 0.85em; white-space: nowrap; grid-column: 2; grid-row: 1 / span 2; align-self: start; }
+  .kf-activity-empty { font-size: 0.85em; opacity: 0.6; font-style: italic; margin: 4px 0 0; }
   .sortable-ghost { opacity: 0.4; }
   .sortable-drag { box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
 
@@ -199,6 +258,37 @@ const kanbanCss = `
   }
   .kanban-toast[hidden] { display: none; }
 
+  /* Archive toggle + drawer. */
+  .kanban-archive-toggle { margin-left: auto; }
+  .kanban-archive {
+    margin-top: 32px;
+    padding: 16px;
+    border: 1px dashed rgba(128,128,128,0.4);
+    border-radius: 8px;
+    background: rgba(128,128,128,0.04);
+  }
+  .kanban-archive[hidden] { display: none; }
+  .kanban-archive-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  .kanban-archive-head h2 { margin: 0; font-size: 1.05em; }
+  .kanban-archive-count { opacity: 0.7; font-size: 0.85em; }
+  .kanban-archive-body { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+  .kanban-archive-empty { opacity: 0.7; font-style: italic; margin: 0; }
+  .kanban-archived-card {
+    opacity: 0.75;
+    position: relative;
+  }
+  .kanban-archived-card .kanban-archived-restore {
+    position: absolute; top: 6px; right: 6px;
+    font-size: 0.75em; padding: 2px 8px; cursor: pointer;
+    background: rgba(128,128,128,0.15); border: 1px solid rgba(128,128,128,0.4);
+    border-radius: 4px; color: inherit;
+  }
+  .kanban-archived-card .kanban-archived-restore:hover { background: rgba(128,128,128,0.3); }
+  .kanban-archived-stamp {
+    font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.08em;
+    opacity: 0.6; margin-top: 4px;
+  }
+
   /* Multi-select groups control in the modal. */
   .kf-groups-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .kf-groups-label { font-size: 0.9em; }
@@ -216,11 +306,20 @@ const kanbanCss = `
 const kanbanClientJs = `
 (function() {
   'use strict';
+  // Active cards visible on the board (indexed by id).
   var cards = new Map();
+  // Archived cards for the currently-open drawer (indexed by id). Only
+  // populated after the user opens "Show archived" at least once per session.
+  var archivedCards = new Map();
+  var archivedLoaded = false;
   var ws = null;
   var reconnectAttempt = 0;
   var pendingClientMsgs = new Map(); // clientMsgId -> { type, meta }
   var editingCardId = null;
+  // When opening an archived card from the drawer, we look it up in
+  // archivedCards instead of cards. This flag tells the modal which action
+  // buttons to show.
+  var editingArchived = false;
 
   var statusEl = document.getElementById('kanban-status');
   var boardEl = document.getElementById('kanban-board');
@@ -237,10 +336,31 @@ const kanbanClientJs = `
   var notesInput = document.getElementById('kf-notes');
   var errorEl = document.getElementById('kf-error');
   var cancelBtn = document.getElementById('kf-cancel');
-  var deleteBtn = document.getElementById('kf-delete');
+  var archiveBtn = document.getElementById('kf-archive');
+  var restoreBtn = document.getElementById('kf-restore');
   var saveBtn = document.getElementById('kf-save');
   var toastEl = document.getElementById('kanban-toast');
   var toastTimer = null;
+  var archiveToggleBtn = document.getElementById('kanban-archive-toggle');
+  var archiveSectionEl = document.getElementById('kanban-archive');
+  var archiveBodyEl = document.getElementById('kanban-archive-body');
+  var archiveCountEl = document.getElementById('kanban-archive-count');
+  var archiveEmptyEl = document.getElementById('kanban-archive-empty');
+  var activitySectionEl = document.getElementById('kf-activity');
+  var activityListEl = document.getElementById('kf-activity-list');
+  var activityEmptyEl = document.getElementById('kf-activity-empty');
+
+  // Column key -> display label. Duplicated from COLUMNS on the server side
+  // so the activity strings can show "moved from Started to Done" rather
+  // than "started to done".
+  var COLUMN_LABELS = {
+    not_started: 'Not Started',
+    started: 'Started',
+    blocked: 'Blocked',
+    ready: 'Ready',
+    approval: 'Approval',
+    done: 'Done',
+  };
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -347,6 +467,146 @@ const kanbanClientJs = `
     return true;
   }
 
+  // ── Markdown renderer ────────────────────────────────────────────────
+  // Intentionally small: supports headings (# / ## / ###…), bullet lists
+  // (- / *), numbered lists (1.), inline **bold**, *italic*/_italic_,
+  // \`code\`, [text](url), and bare URL autolinks. No raw HTML, no images,
+  // no tables. Every character from the input flows through createTextNode;
+  // the only DOM creations are element names we choose ourselves. URLs go
+  // through the URL constructor + a protocol allowlist, so a javascript:
+  // scheme gets normalized and rejected.
+  function safeUrl(url) {
+    try {
+      var u = new URL(url, location.href);
+      return u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:';
+    } catch (_err) { return false; }
+  }
+
+  function renderInlineInto(text, parent) {
+    // Regex order matters: code must win over bold (to protect contents);
+    // bold must win over italic at the same index (**x** would otherwise be
+    // read as *(*x*)*). Links beat autolinks so [text](url) isn't mangled.
+    var patterns = [
+      { re: /\`([^\`]+)\`/,                          type: 'code'     },
+      { re: /\\*\\*([^*]+)\\*\\*/,                     type: 'strong'   },
+      { re: /(?:\\*([^*\\n]+)\\*)|(?:_([^_\\n]+)_)/, type: 'em'       },
+      { re: /\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/,         type: 'link'     },
+      { re: /https?:\\/\\/[^\\s)]+/,                 type: 'autolink' },
+    ];
+    var s = String(text);
+    while (s.length > 0) {
+      var winner = null;
+      var winnerPat = null;
+      for (var k = 0; k < patterns.length; k++) {
+        var m = s.match(patterns[k].re);
+        if (m && (winner === null || m.index < winner.index)) {
+          winner = m;
+          winnerPat = patterns[k];
+        }
+      }
+      if (!winner) { parent.appendChild(document.createTextNode(s)); break; }
+      if (winner.index > 0) {
+        parent.appendChild(document.createTextNode(s.slice(0, winner.index)));
+      }
+      if (winnerPat.type === 'code') {
+        var c = document.createElement('code');
+        c.textContent = winner[1];
+        parent.appendChild(c);
+      } else if (winnerPat.type === 'strong') {
+        var b = document.createElement('strong');
+        b.textContent = winner[1];
+        parent.appendChild(b);
+      } else if (winnerPat.type === 'em') {
+        var em = document.createElement('em');
+        em.textContent = winner[1] || winner[2] || '';
+        parent.appendChild(em);
+      } else if (winnerPat.type === 'link') {
+        var url = winner[2];
+        if (safeUrl(url)) {
+          var a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = winner[1];
+          parent.appendChild(a);
+        } else {
+          parent.appendChild(document.createTextNode(winner[0]));
+        }
+      } else if (winnerPat.type === 'autolink') {
+        var url2 = winner[0];
+        if (safeUrl(url2)) {
+          var a2 = document.createElement('a');
+          a2.href = url2;
+          a2.target = '_blank';
+          a2.rel = 'noopener noreferrer';
+          a2.textContent = url2;
+          parent.appendChild(a2);
+        } else {
+          parent.appendChild(document.createTextNode(url2));
+        }
+      }
+      s = s.slice(winner.index + winner[0].length);
+    }
+  }
+
+  function renderMarkdownInto(md, container) {
+    while (container.firstChild) container.removeChild(container.firstChild);
+    if (!md) return;
+    var lines = String(md).split(/\\r?\\n/);
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      if (!line.trim()) { i++; continue; }
+      var h = line.match(/^(#{1,6})\\s+(.+)$/);
+      if (h) {
+        var tag = 'h' + Math.min(h[1].length, 6);
+        var el = document.createElement(tag);
+        renderInlineInto(h[2], el);
+        container.appendChild(el);
+        i++;
+        continue;
+      }
+      if (/^\\s*[-*]\\s+/.test(line)) {
+        var ul = document.createElement('ul');
+        while (i < lines.length && /^\\s*[-*]\\s+/.test(lines[i])) {
+          var li = document.createElement('li');
+          renderInlineInto(lines[i].replace(/^\\s*[-*]\\s+/, ''), li);
+          ul.appendChild(li);
+          i++;
+        }
+        container.appendChild(ul);
+        continue;
+      }
+      if (/^\\s*\\d+\\.\\s+/.test(line)) {
+        var ol = document.createElement('ol');
+        while (i < lines.length && /^\\s*\\d+\\.\\s+/.test(lines[i])) {
+          var li2 = document.createElement('li');
+          renderInlineInto(lines[i].replace(/^\\s*\\d+\\.\\s+/, ''), li2);
+          ol.appendChild(li2);
+          i++;
+        }
+        container.appendChild(ol);
+        continue;
+      }
+      var pLines = [];
+      while (
+        i < lines.length && lines[i].trim() &&
+        !/^(#{1,6})\\s+/.test(lines[i]) &&
+        !/^\\s*[-*]\\s+/.test(lines[i]) &&
+        !/^\\s*\\d+\\.\\s+/.test(lines[i])
+      ) {
+        pLines.push(lines[i]);
+        i++;
+      }
+      var p = document.createElement('p');
+      for (var j = 0; j < pLines.length; j++) {
+        if (j > 0) p.appendChild(document.createElement('br'));
+        renderInlineInto(pLines[j], p);
+      }
+      container.appendChild(p);
+    }
+  }
+
   function renderAll() {
     for (var i = 0; i < boardEl.children.length; i++) {
       var colKey = boardEl.children[i].getAttribute('data-col');
@@ -419,7 +679,7 @@ const kanbanClientJs = `
     if (card.notes) {
       var notesEl = document.createElement('div');
       notesEl.className = 'kanban-card-notes';
-      notesEl.textContent = card.notes;
+      renderMarkdownInto(card.notes, notesEl);
       el.appendChild(notesEl);
     }
 
@@ -434,9 +694,101 @@ const kanbanClientJs = `
     return c;
   }
 
+  // ── Activity timeline ───────────────────────────────────────────────
+  // Events for the currently-opened card, newest first. Reset every time
+  // the modal opens; not persisted across sessions.
+  var activityEvents = [];
+
+  function relativeTime(iso) {
+    if (!iso) return '';
+    // D1's datetime('now') returns 'YYYY-MM-DD HH:MM:SS' in UTC without a
+    // timezone suffix. Date() needs an explicit Z or offset to parse it as
+    // UTC rather than local time.
+    var s = String(iso);
+    if (s.indexOf('T') < 0 && s.indexOf(' ') > 0) s = s.replace(' ', 'T') + 'Z';
+    var then = new Date(s).getTime();
+    if (isNaN(then)) return iso;
+    var secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+    if (secs < 5) return 'just now';
+    if (secs < 60) return secs + 's ago';
+    var mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    var days = Math.floor(hours / 24);
+    if (days < 30) return days + 'd ago';
+    return new Date(then).toISOString().slice(0, 10);
+  }
+
+  function describeEvent(ev) {
+    var m = ev.metadata || {};
+    switch (ev.kind) {
+      case 'card.created':
+        return 'created this card';
+      case 'card.updated':
+        if (Array.isArray(m.changedFields) && m.changedFields.length) {
+          return 'edited ' + m.changedFields.join(', ');
+        }
+        return 'edited the card';
+      case 'card.moved':
+        var from = COLUMN_LABELS[m.fromColumn] || m.fromColumn || '?';
+        var to = COLUMN_LABELS[m.toColumn] || m.toColumn || '?';
+        return 'moved from ' + from + ' to ' + to;
+      case 'card.archived':
+        return 'archived this card';
+      case 'card.unarchived':
+        return 'restored this card';
+      case 'card.deleted':
+        return 'deleted this card';
+      default:
+        return ev.kind;
+    }
+  }
+
+  function renderActivityInto() {
+    while (activityListEl.firstChild) activityListEl.removeChild(activityListEl.firstChild);
+    if (activityEvents.length === 0) {
+      activityEmptyEl.hidden = false;
+      return;
+    }
+    activityEmptyEl.hidden = true;
+    for (var i = 0; i < activityEvents.length; i++) {
+      var ev = activityEvents[i];
+      var li = document.createElement('li');
+      li.className = 'kf-activity-item';
+
+      var actor = document.createElement('div');
+      actor.className = 'kf-activity-actor';
+      actor.textContent = ev.actorDisplayName || 'System';
+
+      var desc = document.createElement('div');
+      desc.className = 'kf-activity-desc';
+      desc.textContent = describeEvent(ev);
+
+      var time = document.createElement('div');
+      time.className = 'kf-activity-time';
+      time.textContent = relativeTime(ev.createdAt);
+      time.title = ev.createdAt || '';
+
+      li.appendChild(actor);
+      li.appendChild(desc);
+      li.appendChild(time);
+      activityListEl.appendChild(li);
+    }
+  }
+
+  function requestCardEvents(cardId) {
+    activityEvents = [];
+    renderActivityInto();
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_events', cardId: cardId });
+    send({ type: 'list_card_events', clientMsgId: cmid, cardId: cardId });
+  }
+
   // --- Modal ---
   function openCreateModal(column) {
     editingCardId = null;
+    editingArchived = false;
     modalTitleEl.textContent = 'New card';
     titleInput.value = '';
     selectedGroups = [];
@@ -446,18 +798,23 @@ const kanbanClientJs = `
     dueInput.value = '';
     notesInput.value = '';
     errorEl.hidden = true;
-    deleteBtn.hidden = true;
+    archiveBtn.hidden = true;
+    restoreBtn.hidden = true;
+    // No card id yet → no activity timeline to show.
+    activitySectionEl.hidden = true;
+    activityEvents = [];
     saveBtn.disabled = false;
     formEl.dataset.column = column;
     modalEl.hidden = false;
     titleInput.focus();
   }
 
-  function openEditModal(id) {
-    var card = cards.get(id);
+  function openEditModal(id, fromArchive) {
+    var card = fromArchive ? archivedCards.get(id) : cards.get(id);
     if (!card) return;
     editingCardId = id;
-    modalTitleEl.textContent = 'Edit card';
+    editingArchived = !!fromArchive;
+    modalTitleEl.textContent = editingArchived ? 'Archived card' : 'Edit card';
     titleInput.value = card.title;
     selectedGroups = Array.isArray(card.groups) ? card.groups.slice() : [];
     renderSelectedGroups();
@@ -466,7 +823,14 @@ const kanbanClientJs = `
     dueInput.value = card.dueDate || '';
     notesInput.value = card.notes || '';
     errorEl.hidden = true;
-    deleteBtn.hidden = false;
+    // Archive and Restore are mutually exclusive: Archive only appears for
+    // active cards; Restore only appears for archived ones.
+    archiveBtn.hidden = editingArchived;
+    restoreBtn.hidden = !editingArchived;
+    // Reveal the activity timeline and kick off a fetch for this card's
+    // events. The list renders empty while the request is in flight.
+    activitySectionEl.hidden = false;
+    requestCardEvents(id);
     saveBtn.disabled = false;
     formEl.dataset.column = card.column;
     modalEl.hidden = false;
@@ -476,6 +840,7 @@ const kanbanClientJs = `
   function closeModal() {
     modalEl.hidden = true;
     editingCardId = null;
+    editingArchived = false;
   }
 
   function showFormError(msg) {
@@ -509,9 +874,11 @@ const kanbanClientJs = `
       });
       if (!ok) showFormError('Disconnected — try again when reconnected.');
     } else {
-      var card = cards.get(editingCardId);
+      var card = editingArchived
+        ? archivedCards.get(editingCardId)
+        : cards.get(editingCardId);
       if (!card) { showFormError('Card no longer exists.'); return; }
-      pendingClientMsgs.set(cmid, { type: 'update', id: editingCardId });
+      pendingClientMsgs.set(cmid, { type: 'update', id: editingCardId, archived: editingArchived });
       var ok2 = send({
         type: 'update_card',
         clientMsgId: cmid,
@@ -529,15 +896,109 @@ const kanbanClientJs = `
     }
   });
 
-  deleteBtn.addEventListener('click', function() {
+  archiveBtn.addEventListener('click', function() {
     if (editingCardId === null) return;
     var card = cards.get(editingCardId);
     if (!card) { closeModal(); return; }
-    if (!confirm('Delete this card?')) return;
+    // Archive is a soft, reversible action, so a confirm() prompt would be
+    // friction without much safety value. If we later add undo-toast UX we
+    // can drop even this silent barrier; for now we go direct.
     saveBtn.disabled = true;
     var cmid = nextClientMsgId();
-    pendingClientMsgs.set(cmid, { type: 'delete', id: editingCardId });
-    send({ type: 'delete_card', clientMsgId: cmid, id: editingCardId, version: card.version });
+    pendingClientMsgs.set(cmid, { type: 'archive', id: editingCardId });
+    send({ type: 'archive_card', clientMsgId: cmid, id: editingCardId, version: card.version });
+  });
+
+  restoreBtn.addEventListener('click', function() {
+    if (editingCardId === null) return;
+    var card = archivedCards.get(editingCardId);
+    if (!card) { closeModal(); return; }
+    saveBtn.disabled = true;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'unarchive', id: editingCardId });
+    send({ type: 'unarchive_card', clientMsgId: cmid, id: editingCardId, version: card.version });
+  });
+
+  // --- Archive drawer ---
+  function requestArchivedSnapshot() {
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_archived' });
+    send({ type: 'list_archived', clientMsgId: cmid });
+  }
+
+  function renderArchived() {
+    while (archiveBodyEl.firstChild) archiveBodyEl.removeChild(archiveBodyEl.firstChild);
+    if (archivedCards.size === 0) {
+      archiveEmptyEl.hidden = false;
+      archiveCountEl.textContent = '';
+      return;
+    }
+    archiveEmptyEl.hidden = true;
+    archiveCountEl.textContent = '(' + archivedCards.size + ')';
+    // Render in descending archivedAt order; fall back to id for stability.
+    var all = Array.from(archivedCards.values());
+    all.sort(function(a, b) {
+      var aa = a.archivedAt || '';
+      var bb = b.archivedAt || '';
+      if (aa < bb) return 1;
+      if (aa > bb) return -1;
+      return b.id - a.id;
+    });
+    all.forEach(function(card) {
+      archiveBodyEl.appendChild(renderArchivedCardNode(card));
+    });
+  }
+
+  function renderArchivedCardNode(card) {
+    var el = renderCardNode(card);
+    el.classList.add('kanban-archived-card');
+    // Override the click handler to open the modal in "archived" mode so the
+    // Restore button is shown instead of Archive.
+    var clone = el.cloneNode(true);
+    clone.addEventListener('click', function(ev) {
+      // Ignore clicks on the inline Restore button — it has its own handler.
+      if (ev.target && ev.target.classList && ev.target.classList.contains('kanban-archived-restore')) return;
+      openEditModal(card.id, true);
+    });
+
+    var stamp = document.createElement('div');
+    stamp.className = 'kanban-archived-stamp';
+    stamp.textContent = card.archivedAt
+      ? 'Archived ' + card.archivedAt.slice(0, 10)
+      : 'Archived';
+    clone.appendChild(stamp);
+
+    var restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'kanban-archived-restore';
+    restore.textContent = 'Restore';
+    restore.setAttribute('aria-label', 'Restore archived card');
+    restore.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'unarchive', id: card.id });
+      send({ type: 'unarchive_card', clientMsgId: cmid, id: card.id, version: card.version });
+    });
+    clone.appendChild(restore);
+    return clone;
+  }
+
+  archiveToggleBtn.addEventListener('click', function() {
+    var showing = !archiveSectionEl.hidden;
+    if (showing) {
+      archiveSectionEl.hidden = true;
+      archiveToggleBtn.setAttribute('aria-expanded', 'false');
+      archiveToggleBtn.textContent = 'Show archived';
+      return;
+    }
+    archiveSectionEl.hidden = false;
+    archiveToggleBtn.setAttribute('aria-expanded', 'true');
+    archiveToggleBtn.textContent = 'Hide archived';
+    if (!archivedLoaded) {
+      requestArchivedSnapshot();
+    } else {
+      renderArchived();
+    }
   });
 
   // --- Add button per column ---
@@ -589,7 +1050,15 @@ const kanbanClientJs = `
         upsertCard(msg.card);
         return;
       case 'card_updated':
-        upsertCard(msg.card);
+        // Edits on archived cards come back here too; keep them in the
+        // archivedCards map and re-render the drawer if visible.
+        if (msg.card.archivedAt) {
+          archivedCards.set(msg.card.id, msg.card);
+          if (!archiveSectionEl.hidden) renderArchived();
+        } else {
+          upsertCard(msg.card);
+        }
+        // If the modal is open on this card and the update was acked, closeModal runs via the ack handler.
         return;
       case 'card_moved':
         // Apply the canonical post-move positions for all touched cards.
@@ -603,7 +1072,62 @@ const kanbanClientJs = `
         renderAll();
         return;
       case 'card_deleted':
+        // Hard-delete path (not wired to the UI but can still arrive from
+        // an admin tool or a stale client). Purge from both maps.
         removeCardNode(msg.id);
+        archivedCards.delete(msg.id);
+        if (!archiveSectionEl.hidden) renderArchived();
+        return;
+      case 'card_archived':
+        // Remove from the board; add to the archive drawer. The payload
+        // carries the full card (including archivedAt) plus the post-archive
+        // positions of the remaining active cards in the source column.
+        removeCardNode(msg.card.id);
+        archivedCards.set(msg.card.id, msg.card);
+        if (msg.positions && msg.positions.length) {
+          msg.positions.forEach(function(p) {
+            var c = cards.get(p.id);
+            if (c) { c.column = p.column; c.position = p.position; c.version = p.version; }
+          });
+        }
+        renderAll();
+        if (!archiveSectionEl.hidden) renderArchived();
+        return;
+      case 'card_unarchived':
+        // Move back to the board; drop from drawer. Positions payload covers
+        // the destination column's new dense ordering.
+        archivedCards.delete(msg.card.id);
+        cards.set(msg.card.id, msg.card);
+        if (msg.positions && msg.positions.length) {
+          msg.positions.forEach(function(p) {
+            var c = cards.get(p.id);
+            if (c) { c.column = p.column; c.position = p.position; c.version = p.version; }
+          });
+        }
+        renderAll();
+        if (!archiveSectionEl.hidden) renderArchived();
+        return;
+      case 'archived_snapshot':
+        archivedCards.clear();
+        (msg.cards || []).forEach(function(c) { archivedCards.set(c.id, c); });
+        archivedLoaded = true;
+        if (!archiveSectionEl.hidden) renderArchived();
+        return;
+      case 'card_events_snapshot':
+        // Ignore snapshots for a card that's no longer the one being edited
+        // — a user may have closed the modal before the response arrived.
+        if (editingCardId !== msg.cardId) return;
+        activityEvents = (msg.events || []).slice();
+        renderActivityInto();
+        return;
+      case 'card_event':
+        // Live append when the event targets the currently-open card.
+        // Broadcasts arrive for every mutation; other clients just drop them.
+        if (!msg.event || editingCardId !== msg.event.cardId) return;
+        // Events arrive newest-last from the DO, but we display newest-first,
+        // so unshift into the local list.
+        activityEvents.unshift(msg.event);
+        renderActivityInto();
         return;
       case 'ack':
         pendingClientMsgs.delete(msg.clientMsgId);

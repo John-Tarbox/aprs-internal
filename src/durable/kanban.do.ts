@@ -20,12 +20,18 @@ import { z } from 'zod';
 import type { Env } from '../env';
 import {
   KANBAN_COLUMNS,
+  archiveCard,
   createCard,
   deleteCard,
+  listArchivedCards,
+  listCardEvents,
   listCards,
+  logCardEvent,
   moveCard,
+  unarchiveCard,
   updateCard,
   type CardDto,
+  type CardEventDto,
   type ColumnName,
 } from '../services/kanban.service';
 
@@ -92,6 +98,31 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     id: z.number().int().positive(),
     version: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('archive_card'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+    version: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('unarchive_card'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+    version: z.number().int().positive(),
+  }),
+  z.object({
+    // Client requests the archive drawer snapshot. DO replies with
+    // { type: 'archived_snapshot', cards } to the requester only.
+    type: z.literal('list_archived'),
+    clientMsgId: z.string().max(64),
+  }),
+  z.object({
+    // Client requests the activity timeline for a card (modal open). DO
+    // replies with { type: 'card_events_snapshot', cardId, events }.
+    type: z.literal('list_card_events'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
   }),
 ]);
 
@@ -209,6 +240,10 @@ export class KanbanBoardDO extends DurableObject<Env> {
             attachment.userId
           );
           this.broadcast({ type: 'card_created', card });
+          await this.emitCardEvent(card.id, attachment.userId, 'card.created', {
+            column: card.column,
+            position: card.position,
+          });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -231,6 +266,12 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'card_updated', card: updated });
+          // Derive which fields were touched from the patch so the timeline
+          // can show "Updated title, notes" rather than a generic "edited".
+          const changedFields = Object.keys(parsed.patch);
+          if (changedFields.length > 0) {
+            await this.emitCardEvent(updated.id, attachment.userId, 'card.updated', { changedFields });
+          }
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -260,6 +301,16 @@ export class KanbanBoardDO extends DurableObject<Env> {
             toColumn: result.toColumn,
             positions: result.affected,
           });
+          // Only log a move event if the column actually changed — dragging
+          // a card within the same column is usually just reordering and
+          // floods the timeline if logged each time.
+          if (result.fromColumn !== result.toColumn) {
+            await this.emitCardEvent(result.card.id, attachment.userId, 'card.moved', {
+              fromColumn: result.fromColumn,
+              toColumn: result.toColumn,
+              toPosition: result.card.position,
+            });
+          }
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -276,6 +327,83 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'card_deleted', id: parsed.id });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'archive_card': {
+          const result = await archiveCard(
+            this.env.DB,
+            parsed.id,
+            parsed.version,
+            attachment.userId
+          );
+          if (!result) {
+            const cur = await this.readVersion(parsed.id);
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: cur === null ? 'not_found' : 'version_conflict',
+              currentVersion: cur ?? undefined,
+            });
+            return;
+          }
+          // Broadcast: every connected client should remove the card from
+          // the main board view (it's now in the archive drawer) and apply
+          // the post-archive positions of the remaining active cards.
+          this.broadcast({
+            type: 'card_archived',
+            card: result.card,
+            column: result.column,
+            positions: result.affected,
+          });
+          await this.emitCardEvent(result.card.id, attachment.userId, 'card.archived', {
+            column: result.column,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'unarchive_card': {
+          const result = await unarchiveCard(
+            this.env.DB,
+            parsed.id,
+            parsed.version,
+            attachment.userId
+          );
+          if (!result) {
+            const cur = await this.readVersion(parsed.id);
+            this.sendTo(ws, {
+              type: 'nack',
+              clientMsgId: parsed.clientMsgId,
+              reason: cur === null ? 'not_found' : 'version_conflict',
+              currentVersion: cur ?? undefined,
+            });
+            return;
+          }
+          this.broadcast({
+            type: 'card_unarchived',
+            card: result.card,
+            column: result.column,
+            positions: result.affected,
+          });
+          await this.emitCardEvent(result.card.id, attachment.userId, 'card.unarchived', {
+            column: result.column,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'list_archived': {
+          const cards = await listArchivedCards(this.env.DB, attachment.boardId);
+          this.sendTo(ws, { type: 'archived_snapshot', cards });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'list_card_events': {
+          const events = await listCardEvents(this.env.DB, parsed.cardId);
+          this.sendTo(ws, {
+            type: 'card_events_snapshot',
+            cardId: parsed.cardId,
+            events,
+          });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -301,6 +429,29 @@ export class KanbanBoardDO extends DurableObject<Env> {
 
   async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
     console.error('kanban DO websocket error:', error);
+  }
+
+  /**
+   * Write an activity-log row for a card and broadcast it to every socket on
+   * this board. The actor is passed explicitly by the handler (via the
+   * socket's attachment) — we can't infer it here. Swallows errors so a
+   * logging failure never masks a successful mutation — missing events are
+   * less bad than failed writes.
+   */
+  private async emitCardEvent(
+    cardId: number,
+    userId: number | null,
+    kind: Parameters<typeof logCardEvent>[1]['kind'],
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    let event: CardEventDto;
+    try {
+      event = await logCardEvent(this.env.DB, { cardId, userId, kind, metadata });
+    } catch (err) {
+      console.error('logCardEvent failed:', err);
+      return;
+    }
+    this.broadcast({ type: 'card_event', event });
   }
 
   private async readVersion(id: number): Promise<number | null> {
