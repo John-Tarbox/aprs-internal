@@ -2028,6 +2028,8 @@ const kanbanClientJs = `
         openCreateModal(btn.getAttribute('data-add-col'));
       });
     });
+    // Re-bind direct click listeners on the rebuilt color swatches.
+    if (typeof bindColumnColorButtons === 'function') bindColumnColorButtons();
   }
 
   function buildColumnSection(col) {
@@ -2135,19 +2137,23 @@ const kanbanClientJs = `
     });
   });
 
-  // Column color picker (staff/admin) — opens the shared web-safe
-  // picker. Click delegated on boardEl so newly-built columns work
-  // without re-binding. Uses closest() rather than matches() so a
-  // click landing on a descendant (or a CSS pseudo) of the swatch
-  // still triggers correctly. Picker callback fires set_column_color
-  // with the chosen hex (or null to clear).
-  boardEl.addEventListener('click', function(e) {
-    var t = e.target;
-    if (!t || !t.closest) return;
-    var swatch = t.closest('.kanban-col-color');
+  // Column color picker (staff/admin). Opens the shared web-safe
+  // picker. We wire BOTH a delegated handler on boardEl (catches
+  // rebuilt buttons without re-binding) AND a direct per-button
+  // listener via bindColumnColorButtons(). Direct binding is
+  // immune to quirks that can foil delegation (pointer-events,
+  // stopPropagation upstream, etc.) — belt and suspenders on what
+  // turned out to be a surprisingly finicky interaction.
+  function onColumnColorClick(e) {
+    var t = e.currentTarget || e.target;
+    if (!t || !t.getAttribute) return;
+    var swatch = t.getAttribute && t.getAttribute('data-col-color-input')
+      ? t
+      : (t.closest ? t.closest('.kanban-col-color') : null);
     if (!swatch) return;
     if (!currentUser.isStaff) return;
     e.preventDefault();
+    e.stopPropagation();
     var col = swatch.getAttribute('data-col-color-input');
     var cfg = columnConfig.get(col);
     var current = (cfg && cfg.color) || '';
@@ -2161,7 +2167,22 @@ const kanbanClientJs = `
         send({ type: 'set_column_color', clientMsgId: cmid, column: col, color: newColor });
       },
     });
-  });
+  }
+
+  function bindColumnColorButtons() {
+    // Bind directly to each swatch. Idempotent: mark bound ones with
+    // a data attribute so repeated calls after rebuilds don't double-
+    // attach listeners.
+    boardEl.querySelectorAll('.kanban-col-color').forEach(function(btn) {
+      if (btn.getAttribute('data-bound') === '1') return;
+      btn.setAttribute('data-bound', '1');
+      btn.addEventListener('click', onColumnColorClick);
+    });
+  }
+  bindColumnColorButtons();
+
+  // Also the delegated fallback, same handler.
+  boardEl.addEventListener('click', onColumnColorClick);
 
   // Delete column (×).
   boardEl.addEventListener('click', function(e) {
