@@ -20,6 +20,7 @@ import type { BoardDto, ColumnName } from '../services/kanban.service';
 interface KanbanPageProps {
   user: AuthUser;
   board: BoardDto;
+  knownGroups: string[];
 }
 
 export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
@@ -31,7 +32,7 @@ export const COLUMNS: Array<{ key: ColumnName; label: string }> = [
   { key: 'done', label: 'Done' },
 ];
 
-export const KanbanPage: FC<KanbanPageProps> = ({ user, board }) => {
+export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups }) => {
   return (
     <Layout title={`Kanban · ${board.name}`} user={user}>
       <style>{kanbanCss}</style>
@@ -60,9 +61,17 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board }) => {
             <label>Task Name
               <input type="text" id="kf-title" required maxlength={200} />
             </label>
-            <label>Group
-              <input type="text" id="kf-group" maxlength={100} />
-            </label>
+            <div class="kf-groups-field">
+              <span class="kf-groups-label">Groups</span>
+              <div id="kf-groups-chips" class="kf-groups-chips" aria-live="polite"></div>
+              <div class="kf-groups-entry">
+                <input type="text" id="kf-groups-input" list="kf-groups-suggest" maxlength={100}
+                       placeholder="Type or pick a group and press Enter"
+                       aria-label="Add a group" />
+                <datalist id="kf-groups-suggest"></datalist>
+                <button type="button" id="kf-groups-add" class="btn">Add</button>
+              </div>
+            </div>
             <label>Assigned
               <input type="text" id="kf-assigned" maxlength={100} />
             </label>
@@ -83,6 +92,13 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board }) => {
       </div>
 
       <div id="kanban-toast" class="kanban-toast" hidden></div>
+
+      {/* JSON data island — server-rendered list of known group names for
+          autocomplete. Safe: JSON.stringify escapes everything, and the
+          client parses via textContent (not eval) when the type is JSON. */}
+      <script type="application/json" id="kanban-known-groups">
+        {JSON.stringify(knownGroups)}
+      </script>
 
       {/* SortableJS is pinned to a specific version. For stricter security posture,
            compute and add an SRI `integrity` hash, or vendor the file into the Worker
@@ -182,6 +198,19 @@ const kanbanCss = `
     font-size: 0.9em; z-index: 1100; max-width: 90vw;
   }
   .kanban-toast[hidden] { display: none; }
+
+  /* Multi-select groups control in the modal. */
+  .kf-groups-field { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .kf-groups-label { font-size: 0.9em; }
+  .kf-groups-chips { display: flex; flex-wrap: wrap; gap: 4px; min-height: 18px; }
+  .kf-group-chip { display: inline-flex; align-items: center; gap: 4px; }
+  .kf-group-remove {
+    background: none; border: none; color: inherit; cursor: pointer;
+    font: inherit; font-size: 1.1em; line-height: 1; padding: 0 2px; opacity: 0.7;
+  }
+  .kf-group-remove:hover { opacity: 1; }
+  .kf-groups-entry { display: flex; gap: 6px; }
+  .kf-groups-entry input { flex: 1; }
 `;
 
 const kanbanClientJs = `
@@ -199,7 +228,10 @@ const kanbanClientJs = `
   var modalTitleEl = document.getElementById('kanban-modal-title');
   var formEl = document.getElementById('kanban-form');
   var titleInput = document.getElementById('kf-title');
-  var groupInput = document.getElementById('kf-group');
+  var groupsChips = document.getElementById('kf-groups-chips');
+  var groupsInput = document.getElementById('kf-groups-input');
+  var groupsAddBtn = document.getElementById('kf-groups-add');
+  var groupsDatalist = document.getElementById('kf-groups-suggest');
   var assignedInput = document.getElementById('kf-assigned');
   var dueInput = document.getElementById('kf-due');
   var notesInput = document.getElementById('kf-notes');
@@ -225,6 +257,89 @@ const kanbanClientJs = `
   function nextClientMsgId() {
     return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
+
+  // --- Known groups (autocomplete source) ---
+  var knownGroups = [];
+  try {
+    var raw = document.getElementById('kanban-known-groups');
+    if (raw && raw.textContent) knownGroups = JSON.parse(raw.textContent) || [];
+  } catch (_err) { knownGroups = []; }
+
+  function rebuildGroupsDatalist() {
+    while (groupsDatalist.firstChild) groupsDatalist.removeChild(groupsDatalist.firstChild);
+    // Suggest names not already picked on the current card.
+    var taken = new Set();
+    selectedGroups.forEach(function(g) { taken.add(g.toLowerCase()); });
+    knownGroups.forEach(function(g) {
+      if (taken.has(g.toLowerCase())) return;
+      var opt = document.createElement('option');
+      opt.value = g;
+      groupsDatalist.appendChild(opt);
+    });
+  }
+
+  function learnGroup(name) {
+    var key = name.toLowerCase();
+    for (var i = 0; i < knownGroups.length; i++) {
+      if (knownGroups[i].toLowerCase() === key) return;
+    }
+    knownGroups.push(name);
+    knownGroups.sort(function(a, b) { return a.localeCompare(b); });
+  }
+
+  // --- Modal groups state ---
+  var selectedGroups = [];
+
+  function renderSelectedGroups() {
+    while (groupsChips.firstChild) groupsChips.removeChild(groupsChips.firstChild);
+    selectedGroups.forEach(function(g, idx) {
+      var c = document.createElement('span');
+      c.className = 'kanban-chip kf-group-chip';
+      var txt = document.createElement('span');
+      txt.textContent = g;
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'kf-group-remove';
+      x.setAttribute('aria-label', 'Remove group ' + g);
+      x.textContent = '×';
+      x.addEventListener('click', function() {
+        selectedGroups.splice(idx, 1);
+        renderSelectedGroups();
+        rebuildGroupsDatalist();
+      });
+      c.appendChild(txt);
+      c.appendChild(x);
+      groupsChips.appendChild(c);
+    });
+    rebuildGroupsDatalist();
+  }
+
+  function addGroupFromInput() {
+    var v = groupsInput.value.trim();
+    if (!v) return;
+    if (v.length > 100) v = v.slice(0, 100);
+    var key = v.toLowerCase();
+    var dup = selectedGroups.some(function(g) { return g.toLowerCase() === key; });
+    if (!dup) {
+      selectedGroups.push(v);
+      learnGroup(v);
+      renderSelectedGroups();
+    }
+    groupsInput.value = '';
+    groupsInput.focus();
+  }
+
+  groupsAddBtn.addEventListener('click', addGroupFromInput);
+  groupsInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addGroupFromInput();
+    }
+  });
+  groupsInput.addEventListener('change', function() {
+    // The datalist fires 'change' when the user picks a suggestion.
+    if (groupsInput.value.trim()) addGroupFromInput();
+  });
 
   function send(msg) {
     if (!ws || ws.readyState !== 1) return false;
@@ -294,7 +409,9 @@ const kanbanClientJs = `
 
     var meta = document.createElement('div');
     meta.className = 'kanban-card-meta';
-    if (card.group) meta.appendChild(chip('Group: ' + card.group));
+    if (Array.isArray(card.groups)) {
+      card.groups.forEach(function(g) { meta.appendChild(chip(g)); });
+    }
     if (card.assigned) meta.appendChild(chip('@ ' + card.assigned));
     if (card.dueDate) meta.appendChild(chip('Due ' + card.dueDate));
     if (meta.childNodes.length > 0) el.appendChild(meta);
@@ -322,7 +439,9 @@ const kanbanClientJs = `
     editingCardId = null;
     modalTitleEl.textContent = 'New card';
     titleInput.value = '';
-    groupInput.value = '';
+    selectedGroups = [];
+    renderSelectedGroups();
+    groupsInput.value = '';
     assignedInput.value = '';
     dueInput.value = '';
     notesInput.value = '';
@@ -340,7 +459,9 @@ const kanbanClientJs = `
     editingCardId = id;
     modalTitleEl.textContent = 'Edit card';
     titleInput.value = card.title;
-    groupInput.value = card.group || '';
+    selectedGroups = Array.isArray(card.groups) ? card.groups.slice() : [];
+    renderSelectedGroups();
+    groupsInput.value = '';
     assignedInput.value = card.assigned || '';
     dueInput.value = card.dueDate || '';
     notesInput.value = card.notes || '';
@@ -368,6 +489,8 @@ const kanbanClientJs = `
 
   formEl.addEventListener('submit', function(e) {
     e.preventDefault();
+    // Fold any unsubmitted typed group into the chip list before saving.
+    if (groupsInput.value.trim()) addGroupFromInput();
     var title = titleInput.value.trim();
     if (!title) { showFormError('Task Name is required.'); return; }
     saveBtn.disabled = true;
@@ -379,7 +502,7 @@ const kanbanClientJs = `
         clientMsgId: cmid,
         column: formEl.dataset.column,
         title: title,
-        group: groupInput.value.trim() || null,
+        groups: selectedGroups.slice(),
         assigned: assignedInput.value.trim() || null,
         notes: notesInput.value.trim() || null,
         dueDate: dueInput.value || null,
@@ -396,7 +519,7 @@ const kanbanClientJs = `
         version: card.version,
         patch: {
           title: title,
-          group: groupInput.value.trim() || null,
+          groups: selectedGroups.slice(),
           assigned: assignedInput.value.trim() || null,
           notes: notesInput.value.trim() || null,
           dueDate: dueInput.value || null,

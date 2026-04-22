@@ -29,6 +29,7 @@ import {
   renameBoard,
   deleteBoard,
   getColumnCounts,
+  listDistinctGroupNames,
 } from '../services/kanban.service';
 import { KANBAN_COLUMNS } from '../services/kanban.service';
 
@@ -97,7 +98,8 @@ kanbanRoutes.get('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  return c.html(<KanbanPage user={user} board={board} />);
+  const knownGroups = await listDistinctGroupNames(c.env.DB);
+  return c.html(<KanbanPage user={user} board={board} knownGroups={knownGroups} />);
 });
 
 kanbanRoutes.get('/:slug/ws', async (c) => {

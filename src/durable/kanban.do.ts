@@ -61,7 +61,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     clientMsgId: z.string().max(64),
     column: columnEnum,
     title: z.string().min(1).max(MAX_TITLE),
-    group: nullableStr(MAX_FIELD),
+    groups: z.array(z.string().trim().max(MAX_FIELD)).max(20).optional(),
     assigned: nullableStr(MAX_FIELD),
     notes: nullableStr(MAX_NOTES),
     dueDate: dueDateSchema,
@@ -73,7 +73,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     version: z.number().int().positive(),
     patch: z.object({
       title: z.string().min(1).max(MAX_TITLE).optional(),
-      group: nullableStr(MAX_FIELD),
+      groups: z.array(z.string().trim().max(MAX_FIELD)).max(20).optional(),
       assigned: nullableStr(MAX_FIELD),
       notes: nullableStr(MAX_NOTES),
       dueDate: dueDateSchema,
@@ -201,7 +201,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
             {
               column: parsed.column,
               title: parsed.title,
-              group: parsed.group ?? null,
+              groups: parsed.groups,
               assigned: parsed.assigned ?? null,
               notes: parsed.notes ?? null,
               dueDate: parsed.dueDate ?? null,

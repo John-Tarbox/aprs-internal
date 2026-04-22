@@ -161,7 +161,8 @@ export interface CardDto {
   column: ColumnName;
   position: number;
   title: string;
-  group: string | null;
+  /** Zero or more group labels. Always an array; empty when unset. */
+  groups: string[];
   assigned: string | null;
   notes: string | null;
   dueDate: string | null;
@@ -178,7 +179,6 @@ interface RawCardRow {
   column_name: ColumnName;
   position: number;
   title: string;
-  group_name: string | null;
   assigned: string | null;
   notes: string | null;
   due_date: string | null;
@@ -189,14 +189,14 @@ interface RawCardRow {
   updated_at: string;
 }
 
-function hydrateCard(row: RawCardRow): CardDto {
+function hydrateCard(row: RawCardRow, groups: string[]): CardDto {
   return {
     id: row.id,
     boardId: row.board_id,
     column: row.column_name,
     position: row.position,
     title: row.title,
-    group: row.group_name,
+    groups,
     assigned: row.assigned,
     notes: row.notes,
     dueDate: row.due_date,
@@ -206,6 +206,61 @@ function hydrateCard(row: RawCardRow): CardDto {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** Fetch groups for a set of card ids in one query; returns a map cardId -> groups[]. */
+async function loadGroupsForCards(
+  db: D1Database,
+  cardIds: number[]
+): Promise<Map<number, string[]>> {
+  const map = new Map<number, string[]>();
+  if (cardIds.length === 0) return map;
+  const placeholders = cardIds.map(() => '?').join(',');
+  const res = await db
+    .prepare(
+      `SELECT card_id, group_name FROM kanban_card_groups
+       WHERE card_id IN (${placeholders})
+       ORDER BY card_id ASC, group_name ASC`
+    )
+    .bind(...cardIds)
+    .all<{ card_id: number; group_name: string }>();
+  for (const row of res.results ?? []) {
+    const list = map.get(row.card_id);
+    if (list) list.push(row.group_name);
+    else map.set(row.card_id, [row.group_name]);
+  }
+  return map;
+}
+
+async function loadGroupsForCard(db: D1Database, cardId: number): Promise<string[]> {
+  const map = await loadGroupsForCards(db, [cardId]);
+  return map.get(cardId) ?? [];
+}
+
+/** Deduplicate + trim + drop empties, preserving first-seen casing. */
+function normalizeGroups(raw: string[] | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of raw) {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (!t) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+/** Distinct group names ever used (across all boards), sorted alphabetically. */
+export async function listDistinctGroupNames(db: D1Database): Promise<string[]> {
+  const res = await db
+    .prepare(
+      `SELECT DISTINCT group_name FROM kanban_card_groups ORDER BY group_name ASC`
+    )
+    .all<{ group_name: string }>();
+  return (res.results ?? []).map((r) => r.group_name);
 }
 
 /**
@@ -252,13 +307,15 @@ export async function listCards(
     )
     .bind(boardId)
     .all<RawCardRow>();
-  return (res.results ?? []).map(hydrateCard);
+  const rows = res.results ?? [];
+  const groups = await loadGroupsForCards(db, rows.map((r) => r.id));
+  return rows.map((r) => hydrateCard(r, groups.get(r.id) ?? []));
 }
 
 export interface CreateCardInput {
   column: ColumnName;
   title: string;
-  group?: string | null;
+  groups?: string[];
   assigned?: string | null;
   notes?: string | null;
   dueDate?: string | null;
@@ -270,18 +327,19 @@ export async function createCard(
   input: CreateCardInput,
   userId: number | null
 ): Promise<CardDto> {
+  const groups = normalizeGroups(input.groups);
   // Append to the end of the target column on this board.
   const row = await db
     .prepare(
       `INSERT INTO kanban_cards
-         (board_id, column_name, position, title, group_name, assigned, notes, due_date,
+         (board_id, column_name, position, title, assigned, notes, due_date,
           created_by_user_id, updated_by_user_id)
        VALUES (
          ?,
          ?,
          (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
            WHERE board_id = ? AND column_name = ?),
-         ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?
        )
        RETURNING *`
     )
@@ -291,7 +349,6 @@ export async function createCard(
       boardId,
       input.column,
       input.title,
-      input.group ?? null,
       input.assigned ?? null,
       input.notes ?? null,
       input.dueDate ?? null,
@@ -301,12 +358,24 @@ export async function createCard(
     .first<RawCardRow>();
 
   if (!row) throw new Error('Failed to insert kanban card');
-  return hydrateCard(row);
+  if (groups.length > 0) {
+    await db.batch(
+      groups.map((g) =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO kanban_card_groups (card_id, group_name) VALUES (?, ?)`
+          )
+          .bind(row.id, g)
+      )
+    );
+  }
+  return hydrateCard(row, groups);
 }
 
 export interface UpdateCardPatch {
   title?: string;
-  group?: string | null;
+  /** Undefined = don't touch groups. Array = replace the whole set (empty = remove all). */
+  groups?: string[];
   assigned?: string | null;
   notes?: string | null;
   dueDate?: string | null;
@@ -327,10 +396,6 @@ export async function updateCard(
     sets.push('title = ?');
     binds.push(patch.title);
   }
-  if (patch.group !== undefined) {
-    sets.push('group_name = ?');
-    binds.push(patch.group ?? null);
-  }
   if (patch.assigned !== undefined) {
     sets.push('assigned = ?');
     binds.push(patch.assigned ?? null);
@@ -344,14 +409,22 @@ export async function updateCard(
     binds.push(patch.dueDate ?? null);
   }
 
-  if (sets.length === 0) {
+  const normalizedGroups =
+    patch.groups !== undefined ? normalizeGroups(patch.groups) : undefined;
+
+  // If nothing would change at all (no columns + no groups touched), return
+  // the current row at the expected version.
+  if (sets.length === 0 && normalizedGroups === undefined) {
     const row = await db
       .prepare(`SELECT * FROM kanban_cards WHERE id = ? AND version = ?`)
       .bind(id, expectedVersion)
       .first<RawCardRow>();
-    return row ? hydrateCard(row) : null;
+    if (!row) return null;
+    return hydrateCard(row, await loadGroupsForCard(db, id));
   }
 
+  // Always bump version/updated_at when groups are touched, even if no scalar
+  // column changed — callers rely on a version increment after any edit.
   sets.push('version = version + 1');
   sets.push(`updated_at = datetime('now')`);
   sets.push('updated_by_user_id = ?');
@@ -368,7 +441,27 @@ export async function updateCard(
     .bind(...binds)
     .first<RawCardRow>();
 
-  return row ? hydrateCard(row) : null;
+  if (!row) return null;
+
+  if (normalizedGroups !== undefined) {
+    const stmts = [
+      db.prepare(`DELETE FROM kanban_card_groups WHERE card_id = ?`).bind(id),
+      ...normalizedGroups.map((g) =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO kanban_card_groups (card_id, group_name) VALUES (?, ?)`
+          )
+          .bind(id, g)
+      ),
+    ];
+    await db.batch(stmts);
+  }
+
+  const finalGroups =
+    normalizedGroups !== undefined
+      ? normalizedGroups
+      : await loadGroupsForCard(db, id);
+  return hydrateCard(row, finalGroups);
 }
 
 export interface AffectedPosition {
@@ -529,8 +622,9 @@ export async function moveCard(
     .bind(boardId, ...affectedCols)
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
+  const movedGroups = await loadGroupsForCard(db, id);
   return {
-    card: hydrateCard(movedRow),
+    card: hydrateCard(movedRow, movedGroups),
     fromColumn,
     toColumn,
     affected: (affectedRows.results ?? []).map((r) => ({
