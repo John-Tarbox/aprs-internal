@@ -104,11 +104,11 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <span class="kanban-col-title" data-col-title={col.columnName}>{col.label}</span>
               <span class="kanban-col-count" data-col-count={col.columnName} aria-label="Card count"></span>
               {isStaff ? (
-                <input
-                  type="color"
+                <button
+                  type="button"
                   class="kanban-col-color"
                   data-col-color-input={col.columnName}
-                  value={col.color ?? '#94a3b8'}
+                  style={`background: ${col.color ?? '#999999'}`}
                   aria-label={`Color for column ${col.label}`}
                   title="Set column color"
                 />
@@ -183,9 +183,12 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               </label>
             </div>
             <div class="kf-cover-row">
-              <label class="kf-cover-label">Cover color
-                <input type="color" id="kf-cover" />
-              </label>
+              <span class="kf-cover-label-text">Cover color</span>
+              <button type="button" id="kf-cover-swatch" class="ws-trigger" aria-label="Pick a cover color">
+                <span class="ws-trigger-fill" id="kf-cover-fill"></span>
+                <span class="ws-trigger-arrow">▾</span>
+              </button>
+              <span id="kf-cover-name" class="kf-cover-name muted">No cover</span>
               <button type="button" id="kf-cover-clear" class="btn kf-cover-clear">Clear</button>
             </div>
             <label>Notes
@@ -248,6 +251,14 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
           <div class="kanban-modal-actions">
             <button type="button" id="kt-close" class="btn">Close</button>
           </div>
+        </div>
+      </div>
+
+      <div id="ws-color-picker" class="ws-picker" hidden role="dialog" aria-label="Pick a web-safe color">
+        <div id="ws-color-picker-grid" class="ws-picker-grid"></div>
+        <div class="ws-picker-actions">
+          <button type="button" id="ws-color-picker-clear" class="btn">Clear color</button>
+          <button type="button" id="ws-color-picker-cancel" class="btn">Cancel</button>
         </div>
       </div>
 
@@ -694,11 +705,59 @@ const kanbanCss = `
   .kf-due-date { flex: 2; margin: 0; }
   .kf-due-time { flex: 1; margin: 0; }
 
-  /* Card cover color picker in the modal. */
-  .kf-cover-row { display: flex; gap: 8px; align-items: end; margin-top: 12px; }
-  .kf-cover-label { flex: 0 0 auto; margin: 0; font-size: 0.9em; }
-  .kf-cover-label input { width: 60px; height: 32px; padding: 2px; cursor: pointer; }
+  /* Card cover color picker in the modal — now a swatch trigger. */
+  .kf-cover-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  .kf-cover-label-text { font-size: 0.9em; }
+  .kf-cover-name { font-size: 0.85em; font-variant-numeric: tabular-nums; }
   .kf-cover-clear { padding: 6px 10px; font-size: 0.85em; }
+
+  /* Generic web-safe color trigger button: a colored fill + small caret.
+     Used by the card cover, column color, and group chip flows. */
+  .ws-trigger {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: transparent; border: 1px solid rgba(128,128,128,0.4);
+    border-radius: 6px; cursor: pointer;
+    padding: 2px 6px 2px 4px; color: inherit; font: inherit; line-height: 1;
+  }
+  .ws-trigger:hover { border-color: rgba(128,128,128,0.7); }
+  .ws-trigger-fill {
+    display: inline-block; width: 22px; height: 22px;
+    border-radius: 3px; border: 1px solid rgba(128,128,128,0.3);
+    background: #ffffff;
+  }
+  .ws-trigger-arrow { font-size: 0.75em; opacity: 0.6; }
+
+  /* Web-safe color picker popover. Anchored absolutely; positioned in JS
+     near the trigger that opened it. Single shared instance per page. */
+  .ws-picker {
+    position: absolute; z-index: 1500;
+    background: #fff; color: #111;
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 8px; padding: 10px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    .ws-picker { background: #1a1a1a; color: #eee; }
+  }
+  .ws-picker[hidden] { display: none; }
+  .ws-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(18, 18px);
+    gap: 2px;
+    margin-bottom: 10px;
+  }
+  .ws-swatch {
+    width: 18px; height: 18px; padding: 0;
+    border: 1px solid rgba(128,128,128,0.35); border-radius: 3px;
+    cursor: pointer; transition: transform 0.05s linear;
+  }
+  .ws-swatch:hover { transform: scale(1.25); border-color: var(--brand, #2563eb); z-index: 1; position: relative; }
+  .ws-swatch:focus { outline: 2px solid var(--brand, #2563eb); outline-offset: 1px; }
+  .ws-swatch-current {
+    box-shadow: 0 0 0 2px var(--brand, #2563eb);
+    border-color: #fff;
+  }
+  .ws-picker-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
   /* Card cover stripe — thin top band when card.coverColor is set. */
   .kanban-card-cover {
@@ -706,12 +765,15 @@ const kanbanCss = `
     border-radius: 6px 6px 0 0;
   }
 
-  /* Column color: swatch in header (staff editable) + accent on body. */
+  /* Column color: swatch in header (staff editable) + accent on body.
+     Now a <button> rather than <input type=color>; the click opens
+     the shared web-safe picker popover. */
   .kanban-col-color {
-    width: 14px; height: 14px; border-radius: 4px; padding: 0;
-    border: 1px solid rgba(128,128,128,0.4); cursor: pointer;
-    flex-shrink: 0;
+    width: 16px; height: 16px; border-radius: 4px; padding: 0;
+    border: 1px solid rgba(128,128,128,0.5); cursor: pointer;
+    flex-shrink: 0; font: inherit; color: inherit;
   }
+  .kanban-col-color:hover { border-color: var(--brand, #2563eb); }
   .kanban-col[data-col-color] .kanban-col-body {
     border-top: 3px solid var(--col-accent, transparent);
     padding-top: 6px;
@@ -791,18 +853,35 @@ const kanbanClientJs = `
   var startInput = document.getElementById('kf-start');
   var dueInput = document.getElementById('kf-due');
   var dueTimeInput = document.getElementById('kf-due-time');
-  var coverInput = document.getElementById('kf-cover');
+  // Cover color (web-safe): the trigger button's inner fill carries the
+  // current color; coverColorState is null when there's no cover.
+  var coverSwatchBtn = document.getElementById('kf-cover-swatch');
+  var coverFillEl = document.getElementById('kf-cover-fill');
+  var coverNameEl = document.getElementById('kf-cover-name');
   var coverClearBtn = document.getElementById('kf-cover-clear');
   var notesInput = document.getElementById('kf-notes');
-  // Tracks whether the user explicitly set a cover via the picker.
-  // <input type=color> can't represent "no color"; we mirror that
-  // semantic with a separate boolean and the Clear button.
-  var coverSet = false;
-  coverInput.addEventListener('input', function() { coverSet = true; });
-  coverClearBtn.addEventListener('click', function() {
-    coverSet = false;
-    coverInput.value = '#000000';
+  var coverColorState = null;
+  function setCoverColorState(hex) {
+    coverColorState = hex || null;
+    if (coverColorState) {
+      coverFillEl.style.background = coverColorState;
+      coverNameEl.textContent = coverColorState;
+      coverNameEl.classList.remove('muted');
+    } else {
+      coverFillEl.style.background = '#ffffff';
+      coverNameEl.textContent = 'No cover';
+      coverNameEl.classList.add('muted');
+    }
+  }
+  coverSwatchBtn.addEventListener('click', function() {
+    openWebSafeColorPicker({
+      anchor: coverSwatchBtn,
+      current: coverColorState,
+      allowClear: true,
+      onChange: setCoverColorState,
+    });
   });
+  coverClearBtn.addEventListener('click', function() { setCoverColorState(null); });
   var errorEl = document.getElementById('kf-error');
   var cancelBtn = document.getElementById('kf-cancel');
   var archiveBtn = document.getElementById('kf-archive');
@@ -1047,26 +1126,23 @@ const kanbanClientJs = `
       }
       var txt = document.createElement('span');
       txt.textContent = g;
-      // Staff: clicking the label opens an inline color picker that
-      // sets the per-board color for this group. Native <input type=color>
-      // is hidden offscreen and triggered programmatically — feels like
-      // clicking the chip directly opens a color picker.
+      // Staff: clicking the label opens the shared web-safe picker
+      // that sets the per-board color for this group.
       if (currentUser.isStaff) {
         c.classList.add('kanban-chip-editable');
         c.title = 'Click to set color for label "' + g + '"';
-        var picker = document.createElement('input');
-        picker.type = 'color';
-        picker.className = 'kanban-chip-color-input';
-        picker.value = color || '#94a3b8';
-        picker.addEventListener('change', function() {
-          var cmid = nextClientMsgId();
-          pendingClientMsgs.set(cmid, { type: 'set_group_color', name: g });
-          send({ type: 'set_group_color', clientMsgId: cmid, name: g, color: picker.value });
-        });
-        c.appendChild(picker);
         txt.addEventListener('click', function(ev) {
           ev.stopPropagation();
-          picker.click();
+          openWebSafeColorPicker({
+            anchor: txt,
+            current: getGroupColorLocal(g) || '',
+            allowClear: true,
+            onChange: function(newColor) {
+              var cmid = nextClientMsgId();
+              pendingClientMsgs.set(cmid, { type: 'set_group_color', name: g });
+              send({ type: 'set_group_color', clientMsgId: cmid, name: g, color: newColor });
+            },
+          });
         });
       }
       var x = document.createElement('button');
@@ -1118,6 +1194,122 @@ const kanbanClientJs = `
     ws.send(JSON.stringify(msg));
     return true;
   }
+
+  // ── Web-safe color picker (shared popover) ──────────────────────────
+  // 216 colors, 18×12 grid, sorted achromatic-then-by-hue. Single
+  // popover instance reused by every color trigger (card cover, column
+  // color, group chip). Opens absolutely-positioned near its anchor.
+  var WS_HEX_DIGITS = ['00', '33', '66', '99', 'cc', 'ff'];
+  function buildWebSafeList() {
+    var all = [];
+    for (var i = 0; i < 6; i++) {
+      for (var j = 0; j < 6; j++) {
+        for (var k = 0; k < 6; k++) {
+          all.push('#' + WS_HEX_DIGITS[i] + WS_HEX_DIGITS[j] + WS_HEX_DIGITS[k]);
+        }
+      }
+    }
+    function rgbToHsl(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      var max = Math.max(r, g, b), min = Math.min(r, g, b);
+      var h = 0, s = 0, l = (max + min) / 2;
+      if (max !== min) {
+        var d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+        else if (max === g) h = ((b - r) / d + 2) * 60;
+        else h = ((r - g) / d + 4) * 60;
+      }
+      return [h, s, l];
+    }
+    return all.sort(function(a, b) {
+      var ar = parseInt(a.slice(1, 3), 16);
+      var ag = parseInt(a.slice(3, 5), 16);
+      var ab = parseInt(a.slice(5, 7), 16);
+      var br = parseInt(b.slice(1, 3), 16);
+      var bg = parseInt(b.slice(3, 5), 16);
+      var bb = parseInt(b.slice(5, 7), 16);
+      var aH = rgbToHsl(ar, ag, ab), bH = rgbToHsl(br, bg, bb);
+      var aGray = aH[1] < 0.001, bGray = bH[1] < 0.001;
+      if (aGray && !bGray) return -1;
+      if (bGray && !aGray) return 1;
+      if (aGray && bGray) return aH[2] - bH[2];
+      var aHB = Math.round(aH[0] / 30), bHB = Math.round(bH[0] / 30);
+      if (aHB !== bHB) return aHB - bHB;
+      if (Math.abs(aH[2] - bH[2]) > 0.001) return bH[2] - aH[2];
+      return bH[1] - aH[1];
+    });
+  }
+  var WEB_SAFE_COLORS = buildWebSafeList();
+  var wsPickerEl = document.getElementById('ws-color-picker');
+  var wsPickerGridEl = document.getElementById('ws-color-picker-grid');
+  var wsPickerClearBtn = document.getElementById('ws-color-picker-clear');
+  var wsPickerCancelBtn = document.getElementById('ws-color-picker-cancel');
+  var wsPickerCallback = null;
+
+  // Build the swatch grid once.
+  WEB_SAFE_COLORS.forEach(function(hex) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ws-swatch';
+    b.style.background = hex;
+    b.title = hex;
+    b.setAttribute('data-color', hex);
+    b.addEventListener('click', function() {
+      var cb = wsPickerCallback;
+      closeWebSafePicker();
+      if (cb) cb(hex);
+    });
+    wsPickerGridEl.appendChild(b);
+  });
+
+  function openWebSafeColorPicker(opts) {
+    wsPickerCallback = opts.onChange || null;
+    wsPickerClearBtn.hidden = !opts.allowClear;
+    var current = opts.current ? String(opts.current).toLowerCase() : '';
+    wsPickerGridEl.querySelectorAll('.ws-swatch').forEach(function(s) {
+      if (s.getAttribute('data-color') === current) s.classList.add('ws-swatch-current');
+      else s.classList.remove('ws-swatch-current');
+    });
+    // Position absolutely near the anchor's bottom-left, within the
+    // viewport. Render then nudge if it would overflow the right edge.
+    wsPickerEl.hidden = false;
+    var rect = opts.anchor.getBoundingClientRect();
+    var top = rect.bottom + window.scrollY + 4;
+    var left = rect.left + window.scrollX;
+    wsPickerEl.style.top = top + 'px';
+    wsPickerEl.style.left = left + 'px';
+    var pickerRect = wsPickerEl.getBoundingClientRect();
+    var overflowX = (pickerRect.right) - window.innerWidth;
+    if (overflowX > 0) {
+      wsPickerEl.style.left = (left - overflowX - 8) + 'px';
+    }
+  }
+
+  function closeWebSafePicker() {
+    wsPickerEl.hidden = true;
+    wsPickerCallback = null;
+  }
+
+  wsPickerClearBtn.addEventListener('click', function() {
+    var cb = wsPickerCallback;
+    closeWebSafePicker();
+    if (cb) cb(null);
+  });
+  wsPickerCancelBtn.addEventListener('click', closeWebSafePicker);
+  document.addEventListener('click', function(e) {
+    if (wsPickerEl.hidden) return;
+    if (wsPickerEl.contains(e.target)) return;
+    // Don't close if the click came from a registered trigger — those
+    // open the picker themselves, and a same-event close would race.
+    if (e.target && e.target.closest && e.target.closest('.ws-trigger, .kanban-col-color, .kanban-chip-editable')) return;
+    closeWebSafePicker();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && !wsPickerEl.hidden) {
+      closeWebSafePicker();
+    }
+  });
 
   // ── Search / filter ─────────────────────────────────────────────────
   // Pure client-side filtering over the in-memory cards map. Filters
@@ -1863,11 +2055,11 @@ const kanbanClientJs = `
     head.appendChild(count);
 
     if (currentUser.isStaff) {
-      var picker = document.createElement('input');
-      picker.type = 'color';
+      var picker = document.createElement('button');
+      picker.type = 'button';
       picker.className = 'kanban-col-color';
       picker.setAttribute('data-col-color-input', col.columnName);
-      picker.value = col.color || '#94a3b8';
+      picker.style.background = col.color || '#999999';
       picker.title = 'Set column color';
       picker.setAttribute('aria-label', 'Color for column ' + col.label);
       head.appendChild(picker);
@@ -1943,18 +2135,28 @@ const kanbanClientJs = `
     });
   });
 
-  // Column color picker (staff). Native <input type=color> fires 'change'
-  // when the popover closes, so we don't bombard the server while the
-  // user is dragging the swatch.
-  boardEl.addEventListener('change', function(e) {
+  // Column color picker (staff) — opens the shared web-safe picker.
+  // Click delegated on boardEl so newly-built columns work without
+  // re-binding. Picker callback fires set_column_color with the chosen
+  // hex (or null to clear).
+  boardEl.addEventListener('click', function(e) {
     var t = e.target;
     if (!t || !t.matches || !t.matches('.kanban-col-color')) return;
     if (!currentUser.isStaff) return;
+    e.preventDefault();
     var col = t.getAttribute('data-col-color-input');
-    var newColor = t.value;
-    var cmid = nextClientMsgId();
-    pendingClientMsgs.set(cmid, { type: 'set_column_color', column: col });
-    send({ type: 'set_column_color', clientMsgId: cmid, column: col, color: newColor });
+    var cfg = columnConfig.get(col);
+    var current = (cfg && cfg.color) || '';
+    openWebSafeColorPicker({
+      anchor: t,
+      current: current,
+      allowClear: true,
+      onChange: function(newColor) {
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'set_column_color', column: col });
+        send({ type: 'set_column_color', clientMsgId: cmid, column: col, color: newColor });
+      },
+    });
   });
 
   // Delete column (×).
@@ -2603,8 +2805,7 @@ const kanbanClientJs = `
     startInput.value = '';
     dueInput.value = '';
     dueTimeInput.value = '';
-    coverInput.value = '#2563eb';
-    coverSet = false;
+    setCoverColorState(null);
     notesInput.value = '';
     errorEl.hidden = true;
     archiveBtn.hidden = true;
@@ -2654,13 +2855,7 @@ const kanbanClientJs = `
     startInput.value = card.startDate || '';
     dueInput.value = card.dueDate || '';
     dueTimeInput.value = card.dueTime || '';
-    if (card.coverColor) {
-      coverInput.value = card.coverColor;
-      coverSet = true;
-    } else {
-      coverInput.value = '#2563eb';
-      coverSet = false;
-    }
+    setCoverColorState(card.coverColor || null);
     notesInput.value = card.notes || '';
     errorEl.hidden = true;
     // Archive and Restore are mutually exclusive: Archive only appears for
@@ -2728,7 +2923,7 @@ const kanbanClientJs = `
         startDate: startInput.value || null,
         dueDate: dueInput.value || null,
         dueTime: dueTimeInput.value || null,
-        coverColor: coverSet ? coverInput.value : null,
+        coverColor: coverColorState,
       });
       if (!ok) showFormError('Disconnected — try again when reconnected.');
     } else {
@@ -2751,7 +2946,7 @@ const kanbanClientJs = `
           startDate: startInput.value || null,
           dueDate: dueInput.value || null,
           dueTime: dueTimeInput.value || null,
-          coverColor: coverSet ? coverInput.value : null,
+          coverColor: coverColorState,
         },
       });
       if (!ok2) showFormError('Disconnected — try again when reconnected.');
