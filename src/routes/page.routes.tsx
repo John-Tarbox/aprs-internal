@@ -12,6 +12,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../env';
 import { LoginPage } from '../pages/LoginPage';
 import { HomePage } from '../pages/HomePage';
+import { GuideKanban101Page } from '../pages/GuideKanban101Page';
 import { MyCardsPage } from '../pages/MyCardsPage';
 import { CalendarPage } from '../pages/CalendarPage';
 import { DashboardPage } from '../pages/DashboardPage';
@@ -58,6 +59,11 @@ authedPageRoutes.get('/my', async (c) => {
   const user = c.get('user');
   const cards = await listCardsAssignedToUser(c.env.DB, user.id);
   return c.html(<MyCardsPage user={user} cards={cards} />);
+});
+
+authedPageRoutes.get('/guide', (c) => {
+  const user = c.get('user');
+  return c.html(<GuideKanban101Page user={user} />);
 });
 
 authedPageRoutes.get('/dashboard', async (c) => {

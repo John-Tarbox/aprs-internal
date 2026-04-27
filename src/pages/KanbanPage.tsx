@@ -92,6 +92,10 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         <span id="kf-count" class="kf-count" aria-live="polite"></span>
       </div>
 
+      <p id="kanban-empty-prompt" class="kanban-empty-prompt" hidden>
+        First time on this board? The <a href="/guide">Kanban 101 guide</a> covers the basics in about five minutes.
+      </p>
+
       <div class="kanban-board" id="kanban-board" data-board-slug={board.slug}>
         {cols.map((col) => (
           <section
@@ -339,6 +343,19 @@ const kanbanCss = `
   .kt-item:hover .kt-item-del,
   .kt-item:focus-within .kt-item-del { opacity: 0.8; }
   .kt-item-del:hover { color: #b91c1c; opacity: 1; }
+
+  /* Empty-board onboarding hint. Hidden until the cards Map is empty. */
+  .kanban-empty-prompt {
+    margin: 14px 0 0;
+    padding: 10px 14px;
+    border-radius: 6px;
+    background: rgba(37, 99, 235, 0.08);
+    border-left: 3px solid var(--brand);
+    font-size: 0.92em;
+    line-height: 1.45;
+  }
+  .kanban-empty-prompt[hidden] { display: none; }
+  .kanban-empty-prompt a { color: var(--brand); font-weight: 600; }
 
   /* Saved-filter chips row above the filter bar (P4). */
   .kanban-saved-filters {
@@ -1969,6 +1986,8 @@ const kanbanClientJs = `
     // would otherwise show even if a filter is active.
     applyFilters();
     renderColumnHeaders();
+    var emptyPrompt = document.getElementById('kanban-empty-prompt');
+    if (emptyPrompt) emptyPrompt.hidden = cards.size > 0;
   }
 
   function countActiveCardsByColumn() {

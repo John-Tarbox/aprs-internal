@@ -28,6 +28,7 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
               <a href="/calendar">Calendar</a>
               <a href="/timeline">Timeline</a>
               <a href="/dashboard">Dashboard</a>
+              <a href="/guide">Guide</a>
               <button id="kbd-help-btn" type="button" class="link kbd-help-btn"
                       title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts">?</button>
               <span class="who">
@@ -59,7 +60,10 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
         </header>
         <main class="main">{children}</main>
         <footer class="foot">
-          <small>Internal site · APRS Foundation · do not share externally</small>
+          <small>
+            Internal site · APRS Foundation · do not share externally
+            {user ? <> · <a href="/guide">Kanban 101</a></> : null}
+          </small>
         </footer>
         {user ? (
           <div id="kbd-help-overlay" class="kbd-overlay" hidden role="dialog" aria-label="Keyboard shortcuts">
@@ -81,6 +85,7 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
                     <li><kbd>g</kbd> then <kbd>c</kbd> Calendar</li>
                     <li><kbd>g</kbd> then <kbd>l</kbd> Timeline</li>
                     <li><kbd>g</kbd> then <kbd>d</kbd> Dashboard</li>
+                    <li><kbd>g</kbd> then <kbd>u</kbd> Guide</li>
                   </ul>
                 </section>
                 <section>
@@ -433,6 +438,7 @@ const kbdClientJs = `
     c: '/calendar',
     l: '/timeline',
     d: '/dashboard',
+    u: '/guide',
   };
 
   document.addEventListener('keydown', function(e) {
