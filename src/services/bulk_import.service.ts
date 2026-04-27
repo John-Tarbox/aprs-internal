@@ -3,10 +3,13 @@
  * a CSV with a header row.
  *
  * Recognized headers (case-insensitive):
- *   title       (required)           card title
- *   notes       (optional)           card notes / description
- *   assigned    (optional)           legacy free-text assignee
- *   groups      (optional)           pipe- OR comma-separated labels
+ *   title              (required)    card title
+ *   notes              (optional)    card notes / description
+ *   assigned           (optional)    legacy free-text assignee
+ *   labels (or groups) (optional)    pipe- OR comma-separated labels.
+ *                                    "groups" is accepted as a back-
+ *                                    compat alias — earlier versions
+ *                                    of this tool used that name.
  *
  * Unrecognized columns are ignored (logged to the caller as warnings).
  * Rows with an empty title are skipped; rows beyond MAX_ROWS are
@@ -46,10 +49,13 @@ export function parseImportCsv(csv: string): { rows: ImportRow[]; warnings: stri
     return { rows: [], warnings: ['Empty file.'], totalRaw: 0 };
   }
   const header = raw[0];
-  const idx = indexHeaders(header, ['title', 'notes', 'assigned', 'groups']);
+  const idx = indexHeaders(header, ['title', 'notes', 'assigned', 'labels', 'groups']);
   if (idx.title === null) {
     return { rows: [], warnings: ['CSV must have a "title" column.'], totalRaw: raw.length - 1 };
   }
+  // Labels column: prefer the new "labels" header; fall back to the
+  // legacy "groups" header so older CSVs still import cleanly.
+  const labelsIdx = idx.labels !== null ? idx.labels : idx.groups;
   const body = raw.slice(1);
   const totalRaw = body.length;
   if (body.length > MAX_IMPORT_ROWS) {
@@ -63,7 +69,7 @@ export function parseImportCsv(csv: string): { rows: ImportRow[]; warnings: stri
     if (!title) continue; // silently skip empty-title rows
     const notes = idx.notes !== null ? (r[idx.notes] ?? '').trim() : '';
     const assigned = idx.assigned !== null ? (r[idx.assigned] ?? '').trim() : '';
-    const groupsRaw = idx.groups !== null ? (r[idx.groups] ?? '') : '';
+    const groupsRaw = labelsIdx !== null ? (r[labelsIdx] ?? '') : '';
     // Accept either pipe- or comma-separated group lists. Users paste
     // either shape depending on their source tool.
     const groups = groupsRaw

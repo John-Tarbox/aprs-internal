@@ -1200,6 +1200,38 @@ export async function removeBoardColumn(
   return { ok: true };
 }
 
+/**
+ * Reorder all columns on a board. The caller supplies the new order as a
+ * full list of column_name values; we validate it's exactly the current
+ * set (no add/remove, no duplicates) and then renumber positions 0..N-1
+ * in one batch. Returns the refreshed config rows on success, null on
+ * any validation failure.
+ */
+export async function reorderBoardColumns(
+  db: D1Database,
+  boardId: number,
+  orderedColumnNames: string[]
+): Promise<BoardColumnConfigDto[] | null> {
+  const current = await listBoardColumns(db, boardId);
+  if (current.length !== orderedColumnNames.length) return null;
+  const currentSet = new Set(current.map((c) => c.columnName));
+  for (const name of orderedColumnNames) {
+    if (!currentSet.has(name)) return null;
+  }
+  if (new Set(orderedColumnNames).size !== orderedColumnNames.length) return null;
+
+  const stmts = orderedColumnNames.map((name, idx) =>
+    db
+      .prepare(
+        `UPDATE kanban_board_columns SET position = ?
+         WHERE board_id = ? AND column_name = ?`
+      )
+      .bind(idx, boardId, name)
+  );
+  await db.batch(stmts);
+  return listBoardColumns(db, boardId);
+}
+
 export async function listActiveUserDirectory(
   db: D1Database
 ): Promise<AssigneeDto[]> {

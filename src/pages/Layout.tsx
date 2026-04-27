@@ -93,7 +93,7 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
                 <section>
                   <h3>Search operators</h3>
                   <ul class="kbd-ops">
-                    <li><code>assigned:lion</code> · <code>label:urgent</code> · <code>group:bug</code></li>
+                    <li><code>assigned:lion</code> · <code>label:urgent</code></li>
                     <li><code>column:done</code> · <code>has:due</code> · <code>has:cover</code></li>
                     <li><code>is:overdue</code> · <code>is:mine</code> · <code>is:archived</code></li>
                   </ul>

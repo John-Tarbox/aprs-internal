@@ -74,7 +74,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         <input type="search" id="kf-search" class="kf-search"
                placeholder="Search… or operators: assigned:lion label:urgent column:done has:due is:overdue"
                aria-label="Search cards" autocomplete="off"
-               title="Press / anywhere to focus this box. Operators: assigned:, label:, group:, column:, has:due|start|cover|notes, is:overdue|mine|archived|done" />
+               title="Press / anywhere to focus this box. Operators: assigned:, label:, column:, has:due|start|cover|notes, is:overdue|mine|archived|done" />
         <label class="kf-filter-toggle">
           <input type="checkbox" id="kf-mine" />
           <span>Mine</span>
@@ -148,12 +148,12 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <input type="text" id="kf-title" required maxlength={200} />
             </label>
             <div class="kf-groups-field">
-              <span class="kf-groups-label">Groups</span>
+              <span class="kf-groups-label">Labels</span>
               <div id="kf-groups-chips" class="kf-groups-chips" aria-live="polite"></div>
               <div class="kf-groups-entry">
                 <input type="text" id="kf-groups-input" list="kf-groups-suggest" maxlength={100}
-                       placeholder="Type or pick a group and press Enter"
-                       aria-label="Add a group" />
+                       placeholder="Type or pick a label and press Enter"
+                       aria-label="Add a label" />
                 <datalist id="kf-groups-suggest"></datalist>
                 <button type="button" id="kf-groups-add" class="btn">Add</button>
               </div>
@@ -423,6 +423,11 @@ const kanbanCss = `
     padding: 4px 6px 8px; border-bottom: 1px solid rgba(128,128,128,0.2);
     margin-bottom: 8px;
   }
+  /* Staff get a grab cursor on the header strip; the title/buttons
+     override with their own cursors so click targets stay obvious. */
+  body.is-staff .kanban-col-head { cursor: grab; }
+  body.is-staff .kanban-col-head:active { cursor: grabbing; }
+  .kanban-col.sortable-col-ghost { opacity: 0.4; }
   .kanban-col-title { font-weight: 600; font-size: 0.95em; flex: 1; cursor: text; }
   .kanban-col-title.kanban-col-title-edit {
     background: rgba(128,128,128,0.15); border-radius: 3px; padding: 0 4px;
@@ -929,6 +934,9 @@ const kanbanClientJs = `
       currentUser = JSON.parse(cuRaw.textContent) || currentUser;
     }
   } catch (_err) { /* keep default */ }
+  if (currentUser.isStaff) {
+    document.body.classList.add('is-staff');
+  }
 
   // Per-column config (label, position, wipLimit). Indexed by column key.
   // Populated by snapshot/column_config_updated; defaults to empty so
@@ -1154,7 +1162,7 @@ const kanbanClientJs = `
       var x = document.createElement('button');
       x.type = 'button';
       x.className = 'kf-group-remove';
-      x.setAttribute('aria-label', 'Remove group ' + g);
+      x.setAttribute('aria-label', 'Remove label ' + g);
       x.textContent = '×';
       x.addEventListener('click', function() {
         selectedGroups.splice(idx, 1);
@@ -3136,6 +3144,10 @@ const kanbanClientJs = `
   });
 
   // --- Drag-and-drop via SortableJS ---
+  // We hold a single column-level Sortable instance across rebuilds so
+  // we don't end up with duplicate listeners on boardEl after every
+  // structural change.
+  var columnSortable = null;
   function setupSortable() {
     boardEl.querySelectorAll('[data-col-body]').forEach(function(body) {
       new Sortable(body, {
@@ -3163,6 +3175,43 @@ const kanbanClientJs = `
         },
       });
     });
+
+    // Column-level reorder (staff only). Drag handle is the header strip;
+    // the inner controls (title rename, color picker, ×, + add card) are
+    // filtered out so clicks on them keep firing their own handlers.
+    // The "+ Add column" sentinel and any non-.kanban-col children stay
+    // put because draggable is scoped to .kanban-col.
+    if (currentUser.isStaff) {
+      if (columnSortable) {
+        try { columnSortable.destroy(); } catch (_e) { /* best-effort */ }
+        columnSortable = null;
+      }
+      columnSortable = new Sortable(boardEl, {
+        group: 'kanban-cols',
+        animation: 150,
+        draggable: '.kanban-col',
+        handle: '.kanban-col-head',
+        filter: '.kanban-col-title, .kanban-col-color, .kanban-col-del, .kanban-add, .kanban-col-count',
+        preventOnFilter: false,
+        ghostClass: 'sortable-col-ghost',
+        onEnd: function() {
+          var order = Array.prototype.slice
+            .call(boardEl.querySelectorAll('.kanban-col'))
+            .map(function(s) { return s.getAttribute('data-col'); })
+            .filter(function(name) { return !!name; });
+          if (order.length === 0) return;
+          var current = Array.from(columnConfig.values())
+            .sort(function(a, b) { return a.position - b.position; })
+            .map(function(c) { return c.columnName; });
+          var same = order.length === current.length &&
+            order.every(function(n, i) { return n === current[i]; });
+          if (same) return;
+          var cmid = nextClientMsgId();
+          pendingClientMsgs.set(cmid, { type: 'move_column', order: order });
+          send({ type: 'move_column', clientMsgId: cmid, order: order });
+        },
+      });
+    }
   }
 
   // --- Server event dispatch ---
@@ -3384,6 +3433,16 @@ const kanbanClientJs = `
           renderAll();
         }
         return;
+      case 'columns_reordered':
+        if (Array.isArray(msg.columns)) {
+          // Replace the whole config Map so any local drift in position
+          // between this client and the server is reset to the truth.
+          columnConfig.clear();
+          msg.columns.forEach(function(c) { columnConfig.set(c.columnName, c); });
+          rebuildBoardStructure();
+          renderAll();
+        }
+        return;
       case 'group_color_updated':
         if (msg.group && msg.group.name) {
           setGroupColorLocal(msg.group.name, msg.group.color);
@@ -3424,7 +3483,7 @@ const kanbanClientJs = `
         pendingClientMsgs.delete(msg.clientMsgId);
         // Column-management nacks aren't modal-bound, so route them to
         // toast messages with reason-specific text.
-        if (pending && (pending.type === 'add_column' || pending.type === 'rename_column' || pending.type === 'delete_column')) {
+        if (pending && (pending.type === 'add_column' || pending.type === 'rename_column' || pending.type === 'delete_column' || pending.type === 'move_column')) {
           if (msg.reason === 'has_cards') {
             showToast('Can’t delete a column that still has cards — move or archive them first.', 5000);
           } else if (msg.reason === 'last_column') {
@@ -3433,6 +3492,11 @@ const kanbanClientJs = `
             showToast('Only staff+ can change board columns.', 4000);
           } else if (msg.reason === 'not_found') {
             showToast('That column no longer exists — refresh to see current state.', 4000);
+          } else if (pending.type === 'move_column') {
+            // Server rejected the reorder (e.g. set drifted from another
+            // client's add/delete). Resnap to truth: the next snapshot or
+            // columns_reordered broadcast will overwrite local state.
+            showToast('Column order out of sync — refresh to see current state.', 4000);
           } else {
             showToast('Column update failed.', 4000);
           }

@@ -39,6 +39,7 @@ import {
   moveCard,
   removeBoardColumn,
   renameBoardColumn,
+  reorderBoardColumns,
   setColumnColor,
   setColumnWipLimit,
   setGroupColor,
@@ -264,6 +265,14 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     type: z.literal('delete_column'),
     clientMsgId: z.string().max(64),
     column: columnEnum,
+  }),
+  z.object({
+    // Staff+ reorders columns. `order` is the full list of column names
+    // in the desired left-to-right order; the server renumbers positions
+    // 0..N-1 to match.
+    type: z.literal('move_column'),
+    clientMsgId: z.string().max(64),
+    order: z.array(columnEnum).min(1).max(64),
   }),
   z.object({
     // Staff+ sets a column's color. null clears back to the legacy default.
@@ -826,6 +835,24 @@ export class KanbanBoardDO extends DurableObject<Env> {
             return;
           }
           this.broadcast({ type: 'column_removed', column: parsed.column });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'move_column': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const cols = await reorderBoardColumns(
+            this.env.DB,
+            attachment.boardId,
+            parsed.order
+          );
+          if (!cols) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({ type: 'columns_reordered', columns: cols });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

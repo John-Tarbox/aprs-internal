@@ -33,7 +33,7 @@ export const BulkImportPage: FC<BulkImportPageProps> = ({ user, board, columns, 
           <code> title</code> (required),
           <code> notes</code>,
           <code> assigned</code>,
-          <code> groups</code> (pipe- or comma-separated).
+          <code> labels</code> (pipe- or comma-separated; <code>groups</code> accepted as an alias).
         </p>
         <p class="muted">Unknown columns are ignored. Empty-title rows are skipped. Max 500 rows per import; anything above is truncated with a warning.</p>
 
@@ -57,7 +57,7 @@ export const BulkImportPage: FC<BulkImportPageProps> = ({ user, board, columns, 
 
       <section class="card">
         <h2 class="bulk-eyebrow">Example CSV</h2>
-        <pre class="bulk-example">title,notes,assigned,groups{'\n'}Fix login bug,Blocks Okta users,John,bug|urgent{'\n'}Review Q2 plan,,Lion,planning</pre>
+        <pre class="bulk-example">title,notes,assigned,labels{'\n'}Fix login bug,Blocks Okta users,John,bug|urgent{'\n'}Review Q2 plan,,Lion,planning</pre>
       </section>
     </Layout>
   );
