@@ -258,6 +258,10 @@ export interface CardDto {
   updatedByUserId: number | null;
   createdAt: string;
   updatedAt: string;
+  /** True when there is at least one comment from another user that the
+   *  caller (the userId passed to listCards) hasn't yet viewed. Omitted
+   *  when listCards was called without a userId. */
+  hasUnreadComments?: boolean;
 }
 
 interface RawCardRow {
@@ -283,9 +287,10 @@ interface RawCardRow {
 function hydrateCard(
   row: RawCardRow,
   groups: GroupDto[],
-  assignees: AssigneeDto[]
+  assignees: AssigneeDto[],
+  hasUnreadComments?: boolean
 ): CardDto {
-  return {
+  const out: CardDto = {
     id: row.id,
     boardId: row.board_id,
     column: row.column_name,
@@ -306,6 +311,8 @@ function hydrateCard(
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+  if (hasUnreadComments !== undefined) out.hasUnreadComments = hasUnreadComments;
+  return out;
 }
 
 /** Fetch groups (with per-board colors) for a set of card ids in one
@@ -575,6 +582,156 @@ export async function setGroupColor(
     .bind(color, boardId, trimmed)
     .first<{ name: string; color: string | null }>();
   return row ? { name: row.name, color: row.color } : null;
+}
+
+/**
+ * Create a label on a board, idempotently. Case-insensitive collision: if
+ * a label with the same name (any casing) already exists for this board,
+ * return that existing row instead of creating a duplicate. The unique
+ * NOCASE index from migration 0019 enforces this at the DB level too.
+ */
+export async function createGroup(
+  db: D1Database,
+  boardId: number,
+  name: string,
+  color: string | null = null
+): Promise<GroupDto | null> {
+  const trimmed = name.trim().slice(0, 64);
+  if (!trimmed) return null;
+  const existing = await db
+    .prepare(
+      `SELECT name, color FROM kanban_groups
+       WHERE board_id = ? AND name = ? COLLATE NOCASE
+       LIMIT 1`
+    )
+    .bind(boardId, trimmed)
+    .first<{ name: string; color: string | null }>();
+  if (existing) return { name: existing.name, color: existing.color };
+  await db
+    .prepare(`INSERT INTO kanban_groups (board_id, name, color) VALUES (?, ?, ?)`)
+    .bind(boardId, trimmed, color)
+    .run();
+  return { name: trimmed, color };
+}
+
+/**
+ * Rename a label everywhere it appears on this board. Atomic: a single
+ * D1 batch updates the junction (only for cards on this board, since
+ * kanban_card_groups has no board_id column), inserts the new
+ * kanban_groups definition row carrying the old color forward, and
+ * removes the old definition row.
+ *
+ * Returns null on validation failure (empty / no-op rename / missing
+ * source / NOCASE collision with a *different* existing label on this
+ * board). Returns { old, group } on success.
+ */
+export async function renameGroup(
+  db: D1Database,
+  boardId: number,
+  oldName: string,
+  newName: string
+): Promise<{ old: string; group: GroupDto } | null> {
+  const oldTrimmed = oldName.trim();
+  const newTrimmed = newName.trim().slice(0, 64);
+  if (!oldTrimmed || !newTrimmed) return null;
+  if (oldTrimmed === newTrimmed) return null;
+  const src = await db
+    .prepare(
+      `SELECT name, color FROM kanban_groups WHERE board_id = ? AND name = ? LIMIT 1`
+    )
+    .bind(boardId, oldTrimmed)
+    .first<{ name: string; color: string | null }>();
+  if (!src) return null;
+  // Block rename if the new name collides with a *different* existing
+  // label on this board (case-insensitive). Renaming "Urgent" → "urgent"
+  // (same row, different case) is allowed because src.name === oldTrimmed
+  // and a NOCASE match on the same row is fine.
+  const collision = await db
+    .prepare(
+      `SELECT name FROM kanban_groups
+       WHERE board_id = ? AND name = ? COLLATE NOCASE AND name <> ?
+       LIMIT 1`
+    )
+    .bind(boardId, newTrimmed, oldTrimmed)
+    .first<{ name: string }>();
+  if (collision) return null;
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE kanban_card_groups SET group_name = ?
+         WHERE group_name = ?
+           AND card_id IN (SELECT id FROM kanban_cards WHERE board_id = ?)`
+      )
+      .bind(newTrimmed, oldTrimmed, boardId),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO kanban_groups (board_id, name, color)
+         VALUES (?, ?, ?)`
+      )
+      .bind(boardId, newTrimmed, src.color),
+    db
+      .prepare(`DELETE FROM kanban_groups WHERE board_id = ? AND name = ?`)
+      .bind(boardId, oldTrimmed),
+  ]);
+  return { old: oldTrimmed, group: { name: newTrimmed, color: src.color } };
+}
+
+/**
+ * Delete a label from a board: detaches it from every card on this board
+ * (junction rows scoped via the board's cards) and removes its definition
+ * row. Returns true on success, false if the label didn't exist on this
+ * board.
+ */
+export async function deleteGroup(
+  db: D1Database,
+  boardId: number,
+  name: string
+): Promise<boolean> {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  const exists = await db
+    .prepare(`SELECT 1 as ok FROM kanban_groups WHERE board_id = ? AND name = ? LIMIT 1`)
+    .bind(boardId, trimmed)
+    .first<{ ok: number }>();
+  if (!exists) return false;
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM kanban_card_groups
+         WHERE group_name = ?
+           AND card_id IN (SELECT id FROM kanban_cards WHERE board_id = ?)`
+      )
+      .bind(trimmed, boardId),
+    db
+      .prepare(`DELETE FROM kanban_groups WHERE board_id = ? AND name = ?`)
+      .bind(boardId, trimmed),
+  ]);
+  return true;
+}
+
+/**
+ * How many cards on this board reference each named label. Used by the
+ * label-manager UI to warn on delete ("This will remove the label from N
+ * cards"). Skips the bulk-load path because the manager hits this only
+ * when its modal is opened.
+ */
+export async function countCardsPerGroup(
+  db: D1Database,
+  boardId: number
+): Promise<Record<string, number>> {
+  const res = await db
+    .prepare(
+      `SELECT g.group_name AS name, COUNT(*) AS cnt
+       FROM kanban_card_groups g
+       JOIN kanban_cards c ON c.id = g.card_id
+       WHERE c.board_id = ? AND c.archived_at IS NULL
+       GROUP BY g.group_name`
+    )
+    .bind(boardId)
+    .all<{ name: string; cnt: number }>();
+  const out: Record<string, number> = {};
+  for (const r of res.results ?? []) out[r.name] = r.cnt;
+  return out;
 }
 
 // ── Table view (S15) — flat queryable list of active cards ──────────────
@@ -1109,9 +1266,26 @@ export async function listCardsAssignedToUser(
 }
 
 /**
+ * Hard cap on columns per board. Boards with this many columns refuse
+ * further additions; the DO turns the resulting error into a typed nack.
+ */
+export const MAX_BOARD_COLUMNS = 7;
+
+export class KanbanColumnLimitError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`Boards are limited to ${limit} columns.`);
+    this.name = 'KanbanColumnLimitError';
+    this.limit = limit;
+  }
+}
+
+/**
  * Add a new column to a board. The key is normalized; on collision with
  * an existing column the call is a no-op and returns the existing config
- * row. New columns go to the end of the position order.
+ * row. New columns go to the end of the position order. Throws
+ * KanbanColumnLimitError when the board already has MAX_BOARD_COLUMNS;
+ * idempotent re-adds of an existing column are allowed even at the cap.
  */
 export async function addBoardColumn(
   db: D1Database,
@@ -1122,6 +1296,17 @@ export async function addBoardColumn(
   const key = normalizeColumnKey(rawKey);
   const label = rawLabel.trim().slice(0, 64);
   if (!key || !label) return null;
+  const existing = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM kanban_board_columns WHERE board_id = ?1) AS total,
+         (SELECT 1 FROM kanban_board_columns WHERE board_id = ?1 AND column_name = ?2 LIMIT 1) AS has_key`
+    )
+    .bind(boardId, key)
+    .first<{ total: number; has_key: number | null }>();
+  if (!existing?.has_key && (existing?.total ?? 0) >= MAX_BOARD_COLUMNS) {
+    throw new KanbanColumnLimitError(MAX_BOARD_COLUMNS);
+  }
   await db
     .prepare(
       `INSERT OR IGNORE INTO kanban_board_columns (board_id, column_name, label, position)
@@ -1265,16 +1450,6 @@ function normalizeGroups(raw: string[] | undefined): string[] {
   return out;
 }
 
-/** Distinct group names ever used (across all boards), sorted alphabetically. */
-export async function listDistinctGroupNames(db: D1Database): Promise<string[]> {
-  const res = await db
-    .prepare(
-      `SELECT DISTINCT group_name FROM kanban_card_groups ORDER BY group_name ASC`
-    )
-    .all<{ group_name: string }>();
-  return (res.results ?? []).map((r) => r.group_name);
-}
-
 /**
  * Count cards per column. Every column is present in the result, zero-filled.
  * When `boardId` is omitted, aggregates across every board (the home tile's
@@ -1317,17 +1492,39 @@ export async function getColumnCounts(
  * Active cards on a board (archived excluded). The board view uses this for
  * its snapshot — archived cards load on demand via listArchivedCards().
  */
+/**
+ * List active cards for a board. When `viewerUserId` is passed, the
+ * returned DTOs carry `hasUnreadComments` — true when there is any
+ * comment authored by someone *other than* the viewer that was created
+ * after the viewer's last `kanban_card_views` timestamp (or the viewer
+ * has never opened the card and a non-self comment exists). Self-
+ * authored comments never count as unread for the author.
+ */
 export async function listCards(
   db: D1Database,
-  boardId: number
+  boardId: number,
+  viewerUserId?: number
 ): Promise<CardDto[]> {
-  const res = await db
-    .prepare(
-      `SELECT * FROM kanban_cards WHERE board_id = ? AND archived_at IS NULL
-       ORDER BY column_name ASC, position ASC, id ASC`
-    )
-    .bind(boardId)
-    .all<RawCardRow>();
+  type UnreadRow = RawCardRow & { has_unread_comments?: number };
+  const sql = viewerUserId !== undefined
+    ? `SELECT c.*,
+         CASE WHEN EXISTS (
+           SELECT 1 FROM kanban_card_comments cm
+           LEFT JOIN kanban_card_views v
+             ON v.card_id = cm.card_id AND v.user_id = ?2
+           WHERE cm.card_id = c.id
+             AND (cm.author_user_id IS NULL OR cm.author_user_id <> ?2)
+             AND (v.last_viewed_at IS NULL OR cm.created_at > v.last_viewed_at)
+         ) THEN 1 ELSE 0 END AS has_unread_comments
+       FROM kanban_cards c
+       WHERE c.board_id = ?1 AND c.archived_at IS NULL
+       ORDER BY c.column_name ASC, c.position ASC, c.id ASC`
+    : `SELECT * FROM kanban_cards WHERE board_id = ?1 AND archived_at IS NULL
+       ORDER BY column_name ASC, position ASC, id ASC`;
+  const stmt = viewerUserId !== undefined
+    ? db.prepare(sql).bind(boardId, viewerUserId)
+    : db.prepare(sql).bind(boardId);
+  const res = await stmt.all<UnreadRow>();
   const rows = res.results ?? [];
   const ids = rows.map((r) => r.id);
   const [groups, assignees] = await Promise.all([
@@ -1335,8 +1532,33 @@ export async function listCards(
     loadAssigneesForCards(db, ids),
   ]);
   return rows.map((r) =>
-    hydrateCard(r, groups.get(r.id) ?? [], assignees.get(r.id) ?? [])
+    hydrateCard(
+      r,
+      groups.get(r.id) ?? [],
+      assignees.get(r.id) ?? [],
+      viewerUserId !== undefined ? !!r.has_unread_comments : undefined
+    )
   );
+}
+
+/**
+ * Upsert the viewer's last-viewed timestamp on a card. Called when the
+ * card detail modal opens; clears the unread-comments dot for that user.
+ */
+export async function markCardViewed(
+  db: D1Database,
+  userId: number,
+  cardId: number
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO kanban_card_views (user_id, card_id, last_viewed_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(user_id, card_id)
+       DO UPDATE SET last_viewed_at = datetime('now')`
+    )
+    .bind(userId, cardId)
+    .run();
 }
 
 /**

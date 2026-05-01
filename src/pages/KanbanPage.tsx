@@ -20,17 +20,23 @@ import type {
   BoardColumnConfigDto,
   BoardDto,
   ColumnName,
+  GroupDto,
 } from '../services/kanban.service';
 
 interface KanbanPageProps {
   user: AuthUser;
   board: BoardDto;
-  knownGroups: string[];
+  /** Per-board labels with their colors. Replaces the older global
+   *  `knownGroups: string[]` (which leaked labels across boards). */
+  boardGroups: GroupDto[];
   /** Active-user directory for the assignee picker. */
   knownUsers: AssigneeDto[];
   /** Per-board column config (S12). Server-rendered as the initial board
    *  structure; the client rebuilds when columns are added/renamed/deleted. */
   columns: BoardColumnConfigDto[];
+  /** Hard cap on columns per board. Mirrored to the client so the add-
+   *  column UI can self-disable at the limit without a round-trip. */
+  maxBoardColumns: number;
 }
 
 /** Legacy default — kept only as a server-side fallback if a board has
@@ -45,7 +51,14 @@ const FALLBACK_COLUMNS: BoardColumnConfigDto[] = [
   { columnName: 'done', label: 'Done', position: 5, wipLimit: null, color: null },
 ];
 
-export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, knownUsers, columns }) => {
+export const KanbanPage: FC<KanbanPageProps> = ({
+  user,
+  board,
+  boardGroups,
+  knownUsers,
+  columns,
+  maxBoardColumns,
+}) => {
   const cols = columns.length > 0 ? columns : FALLBACK_COLUMNS;
   const isStaff = user.roles.includes('admin') || user.roles.includes('staff');
   return (
@@ -89,6 +102,9 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         </label>
         <button type="button" id="kf-clear" class="btn kf-clear" hidden>Clear</button>
         <button type="button" id="kf-save-filter" class="btn kf-save-filter" hidden title="Save the current query as a named filter">★ Save</button>
+        {isStaff ? (
+          <button type="button" id="kf-manage-labels" class="btn" title="Manage this board's labels">Manage labels</button>
+        ) : null}
         <span id="kf-count" class="kf-count" aria-live="polite"></span>
       </div>
 
@@ -105,6 +121,13 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
             style={col.color ? `--col-accent: ${col.color}` : undefined}
           >
             <header class="kanban-col-head">
+              <button
+                type="button"
+                class="kanban-col-collapse"
+                data-col-collapse={col.columnName}
+                aria-label={`Collapse column ${col.label}`}
+                title="Collapse"
+              >‹</button>
               <span class="kanban-col-title" data-col-title={col.columnName}>{col.label}</span>
               <span class="kanban-col-count" data-col-count={col.columnName} aria-label="Card count"></span>
               {isStaff ? (
@@ -155,11 +178,19 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
               <span class="kf-groups-label">Labels</span>
               <div id="kf-groups-chips" class="kf-groups-chips" aria-live="polite"></div>
               <div class="kf-groups-entry">
-                <input type="text" id="kf-groups-input" list="kf-groups-suggest" maxlength={100}
-                       placeholder="Type or pick a label and press Enter"
-                       aria-label="Add a label" />
-                <datalist id="kf-groups-suggest"></datalist>
-                <button type="button" id="kf-groups-add" class="btn">Add</button>
+                <button type="button" id="kf-groups-pick" class="btn" aria-haspopup="listbox" aria-expanded="false">+ Add label</button>
+                <div id="kf-groups-popover" class="kf-groups-popover" hidden role="listbox" aria-label="Existing labels">
+                  <div id="kf-groups-popover-list" class="kf-groups-popover-list"></div>
+                  <div id="kf-groups-popover-empty" class="kf-groups-popover-empty" hidden>No labels on this board yet.</div>
+                  <div id="kf-groups-popover-newrow" class="kf-groups-popover-newrow" hidden>
+                    <input type="text" id="kf-groups-popover-name" maxlength={64}
+                           placeholder="New label name"
+                           aria-label="New label name" />
+                    <button type="button" id="kf-groups-popover-create" class="btn">Create</button>
+                    <button type="button" id="kf-groups-popover-cancel" class="btn">Cancel</button>
+                  </div>
+                  <button type="button" id="kf-groups-popover-newbtn" class="kf-groups-popover-newbtn" hidden>+ New label</button>
+                </div>
               </div>
             </div>
             <div class="kf-assignees-field">
@@ -259,6 +290,25 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
         </div>
       </div>
 
+      {isStaff ? (
+        <div id="kanban-labels-modal" class="kanban-modal" hidden role="dialog" aria-label="Manage labels">
+          <div class="kanban-modal-inner">
+            <h2>Manage labels</h2>
+            <p class="muted">Edits propagate to every card on this board that uses the label.</p>
+            <ul id="kl-list" class="kl-list"></ul>
+            <p class="muted" id="kl-empty" hidden>No labels yet. Add one below.</p>
+            <div class="kl-newrow">
+              <input type="text" id="kl-new-name" maxlength={64} placeholder="New label name" aria-label="New label name" />
+              <button type="button" id="kl-new-color" class="kanban-col-color" style="background:#999999" aria-label="Pick color for new label" title="Pick color"></button>
+              <button type="button" id="kl-new-add" class="btn">+ Add label</button>
+            </div>
+            <div class="kanban-modal-actions">
+              <button type="button" id="kl-close" class="btn">Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div id="ws-color-picker" class="ws-picker" hidden role="dialog" aria-label="Pick a web-safe color">
         <div id="ws-color-picker-grid" class="ws-picker-grid"></div>
         <div class="ws-picker-actions">
@@ -278,8 +328,8 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
           literal &quot; and throw. The fix is `raw()` + pre-escaping
           </ to <\/ to prevent script-block break-out if any string
           ever contains a closing script tag. */}
-      <script type="application/json" id="kanban-known-groups">
-        {raw(JSON.stringify(knownGroups).replace(/<\//g, '<\\/'))}
+      <script type="application/json" id="kanban-board-groups">
+        {raw(JSON.stringify(boardGroups).replace(/<\//g, '<\\/'))}
       </script>
       <script type="application/json" id="kanban-current-user">
         {raw(
@@ -294,6 +344,9 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
       <script type="application/json" id="kanban-known-users">
         {raw(JSON.stringify(knownUsers).replace(/<\//g, '<\\/'))}
       </script>
+      <script type="application/json" id="kanban-max-columns">
+        {raw(JSON.stringify(maxBoardColumns))}
+      </script>
 
       {/* SortableJS is pinned to a specific version. For stricter security posture,
            compute and add an SRI `integrity` hash, or vendor the file into the Worker
@@ -305,7 +358,8 @@ export const KanbanPage: FC<KanbanPageProps> = ({ user, board, knownGroups, know
 };
 
 const kanbanCss = `
-  /* Break out of Layout's .main max-width: 960px; 6 columns need ~1200px. */
+  /* Break out of Layout's .main max-width so the horizontal column track
+     can use the full viewport before the internal scrollbar engages. */
   body:has(.kanban-board) .main { max-width: none; padding: 0 16px; }
 
   .kanban-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -420,11 +474,14 @@ const kanbanCss = `
   .kanban-card.kf-hidden { display: none; }
 
   .kanban-board {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(200px, 1fr));
+    display: flex;
+    flex-wrap: nowrap;
     gap: 12px;
     margin-top: 24px;
     overflow-x: auto;
+    overflow-y: visible;
+    padding-bottom: 8px;
+    scroll-snap-type: x proximity;
   }
   .kanban-col {
     background: rgba(128,128,128,0.06);
@@ -434,7 +491,10 @@ const kanbanCss = `
     min-height: 200px;
     display: flex;
     flex-direction: column;
+    flex: 0 0 280px;
+    scroll-snap-align: start;
   }
+  .kanban-col-add { flex: 0 0 200px; }
   .kanban-col-head {
     display: flex; align-items: center; justify-content: space-between;
     padding: 4px 6px 8px; border-bottom: 1px solid rgba(128,128,128,0.2);
@@ -802,10 +862,56 @@ const kanbanCss = `
     flex-shrink: 0; font: inherit; color: inherit;
   }
   .kanban-col-color:hover { border-color: var(--brand, #2563eb); }
-  .kanban-col[data-col-color] .kanban-col-body {
-    border-top: 3px solid var(--col-accent, transparent);
-    padding-top: 6px;
-    margin-top: -1px;
+  /* Column color, when set, paints the full column background as a soft
+   * ~20% tint of the chosen accent rather than a 3px top stripe. Using
+   * color-mix keeps text readable across the entire web-safe palette
+   * without requiring per-color tuning. The header divider's border and
+   * the section border absorb a stronger blend to maintain definition. */
+  .kanban-col[data-col-color] {
+    background: color-mix(in srgb, var(--col-accent) 20%, rgba(128,128,128,0.06));
+    border-color: color-mix(in srgb, var(--col-accent) 35%, rgba(128,128,128,0.2));
+  }
+  .kanban-col[data-col-color] .kanban-col-head {
+    border-bottom-color: color-mix(in srgb, var(--col-accent) 30%, rgba(128,128,128,0.2));
+  }
+
+  /* Collapsible columns: per-user, persisted in localStorage by the
+   * client script. Width shrinks to a thin strip with a vertical title;
+   * cards and add/edit affordances hide. */
+  .kanban-col-collapse {
+    background: none; border: none; cursor: pointer; font-size: 14px;
+    line-height: 1; padding: 2px 4px; flex-shrink: 0; color: inherit;
+    opacity: 0.7;
+  }
+  .kanban-col-collapse:hover { opacity: 1; }
+  .kanban-col.kanban-col-collapsed { flex: 0 0 40px; padding: 4px; min-height: 80px; }
+  .kanban-col.kanban-col-collapsed .kanban-col-body,
+  .kanban-col.kanban-col-collapsed .kanban-add,
+  .kanban-col.kanban-col-collapsed .kanban-col-color,
+  .kanban-col.kanban-col-collapsed .kanban-col-del { display: none; }
+  .kanban-col.kanban-col-collapsed .kanban-col-head {
+    flex-direction: column; align-items: center; padding: 8px 2px; gap: 8px;
+    border-bottom: none; margin-bottom: 0;
+  }
+  .kanban-col.kanban-col-collapsed .kanban-col-title {
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    white-space: nowrap; font-weight: 600; max-height: 200px; overflow: hidden;
+  }
+  .kanban-col.kanban-col-collapsed .kanban-col-collapse { transform: rotate(180deg); }
+
+  /* Unread-comments dot on the card tile. Positioned top-right, uses the
+   * same accent tone as a notification chip elsewhere in the app. */
+  .kanban-card { position: relative; }
+  .kanban-card-unread {
+    position: absolute; top: 6px; right: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--brand, #2563eb);
+    pointer-events: none;
+  }
+  .kanban-card-unread::after {
+    content: ''; position: absolute; top: -2px; right: -2px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ef4444; border: 2px solid var(--bg, #fff);
   }
 
   /* Group/label chip — when a color is set, the chip background uses
@@ -845,8 +951,68 @@ const kanbanCss = `
     font: inherit; font-size: 1.1em; line-height: 1; padding: 0 2px; opacity: 0.7;
   }
   .kf-group-remove:hover { opacity: 1; }
-  .kf-groups-entry { display: flex; gap: 6px; }
+  .kf-groups-entry { display: flex; gap: 6px; position: relative; }
   .kf-groups-entry input { flex: 1; }
+
+  /* Per-card label picker popover. Replaces the older free-text input;
+   * the "+ New label" affordance only renders for staff. */
+  .kf-groups-popover {
+    position: absolute; top: 100%; left: 0; z-index: 70;
+    margin-top: 4px; min-width: 220px; max-width: 320px;
+    max-height: 280px; overflow: auto;
+    background: var(--bg, #fff); color: inherit;
+    border: 1px solid rgba(128,128,128,0.3); border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.15); padding: 6px;
+  }
+  .kf-groups-popover-list { display: flex; flex-direction: column; gap: 4px; }
+  .kf-groups-popover-list .kanban-chip {
+    cursor: pointer; text-align: left; user-select: none;
+  }
+  .kf-groups-popover-empty { font-size: 0.9em; opacity: 0.7; padding: 6px 4px; }
+  .kf-groups-popover-newbtn {
+    display: block; width: 100%; margin-top: 6px; padding: 6px 8px;
+    background: rgba(128,128,128,0.08); border: 1px dashed rgba(128,128,128,0.4);
+    border-radius: 4px; cursor: pointer; font: inherit; color: inherit;
+    text-align: left;
+  }
+  .kf-groups-popover-newbtn:hover { background: rgba(128,128,128,0.14); }
+  .kf-groups-popover-newrow {
+    display: flex; gap: 6px; margin-top: 6px;
+    border-top: 1px solid rgba(128,128,128,0.2); padding-top: 6px;
+  }
+  .kf-groups-popover-newrow input { flex: 1; min-width: 0; }
+
+  /* Label-manager modal (staff only). */
+  .kl-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow: auto; }
+  .kl-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 4px;
+    border-bottom: 1px solid rgba(128,128,128,0.15);
+  }
+  .kl-row:last-child { border-bottom: none; }
+  .kl-row .kl-color {
+    width: 20px; height: 20px; border-radius: 4px; padding: 0;
+    border: 1px solid rgba(128,128,128,0.5); cursor: pointer; flex-shrink: 0;
+  }
+  .kl-row .kl-name {
+    flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid transparent;
+    border-radius: 4px; background: transparent; font: inherit; color: inherit;
+  }
+  .kl-row .kl-name:focus,
+  .kl-row .kl-name:hover {
+    border-color: rgba(128,128,128,0.3); background: rgba(128,128,128,0.06);
+    outline: none;
+  }
+  .kl-row .kl-count { font-size: 0.85em; opacity: 0.65; flex-shrink: 0; }
+  .kl-row .kl-delete {
+    background: none; border: none; cursor: pointer; color: inherit;
+    font-size: 1.2em; line-height: 1; padding: 2px 6px; opacity: 0.6;
+  }
+  .kl-row .kl-delete:hover { opacity: 1; color: #c11; }
+  .kl-newrow {
+    display: flex; gap: 6px; margin-top: 12px; padding-top: 10px;
+    border-top: 1px solid rgba(128,128,128,0.2); align-items: center;
+  }
+  .kl-newrow input { flex: 1; min-width: 0; }
 `;
 
 const kanbanClientJs = `
@@ -874,9 +1040,18 @@ const kanbanClientJs = `
   var formEl = document.getElementById('kanban-form');
   var titleInput = document.getElementById('kf-title');
   var groupsChips = document.getElementById('kf-groups-chips');
-  var groupsInput = document.getElementById('kf-groups-input');
-  var groupsAddBtn = document.getElementById('kf-groups-add');
-  var groupsDatalist = document.getElementById('kf-groups-suggest');
+  // Per-card label picker (button-triggered popover; replaces the older
+  // free-text input + datalist). The picker is the only path to attach
+  // a label on a card; staff additionally see a "+ New label" affordance.
+  var groupsPickBtn = document.getElementById('kf-groups-pick');
+  var groupsPopover = document.getElementById('kf-groups-popover');
+  var groupsPopoverList = document.getElementById('kf-groups-popover-list');
+  var groupsPopoverEmpty = document.getElementById('kf-groups-popover-empty');
+  var groupsPopoverNewBtn = document.getElementById('kf-groups-popover-newbtn');
+  var groupsPopoverNewRow = document.getElementById('kf-groups-popover-newrow');
+  var groupsPopoverNewName = document.getElementById('kf-groups-popover-name');
+  var groupsPopoverCreate = document.getElementById('kf-groups-popover-create');
+  var groupsPopoverCancel = document.getElementById('kf-groups-popover-cancel');
   var assignedInput = document.getElementById('kf-assigned');
   var startInput = document.getElementById('kf-start');
   var dueInput = document.getElementById('kf-due');
@@ -1112,33 +1287,50 @@ const kanbanClientJs = `
     return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
 
-  // --- Known groups (autocomplete source) ---
-  var knownGroups = [];
+  // --- Per-board label palette (replaces the old global "knownGroups").
+  // boardGroups holds {name, color|null} for every label defined on this
+  // board; the picker, label-manager modal, and chip color lookup all
+  // read from it. Initial value is server-rendered; live updates arrive
+  // via group_created / group_renamed / group_deleted broadcasts.
+  var boardGroups = [];
   try {
-    var raw = document.getElementById('kanban-known-groups');
-    if (raw && raw.textContent) knownGroups = JSON.parse(raw.textContent) || [];
-  } catch (_err) { knownGroups = []; }
-
-  function rebuildGroupsDatalist() {
-    while (groupsDatalist.firstChild) groupsDatalist.removeChild(groupsDatalist.firstChild);
-    // Suggest names not already picked on the current card.
-    var taken = new Set();
-    selectedGroups.forEach(function(g) { taken.add(g.toLowerCase()); });
-    knownGroups.forEach(function(g) {
-      if (taken.has(g.toLowerCase())) return;
-      var opt = document.createElement('option');
-      opt.value = g;
-      groupsDatalist.appendChild(opt);
-    });
+    var raw = document.getElementById('kanban-board-groups');
+    if (raw && raw.textContent) boardGroups = JSON.parse(raw.textContent) || [];
+  } catch (_err) { boardGroups = []; }
+  // Seed groupColors from the server-rendered palette so chips render
+  // with correct colors before any WebSocket message arrives.
+  boardGroups.forEach(function(g) {
+    if (g && g.color) groupColors.set(groupColorKey(g.name), g.color);
+  });
+  function sortBoardGroups() {
+    boardGroups.sort(function(a, b) { return a.name.localeCompare(b.name); });
   }
-
-  function learnGroup(name) {
-    var key = name.toLowerCase();
-    for (var i = 0; i < knownGroups.length; i++) {
-      if (knownGroups[i].toLowerCase() === key) return;
+  function findBoardGroup(name) {
+    var key = String(name || '').toLowerCase();
+    for (var i = 0; i < boardGroups.length; i++) {
+      if (boardGroups[i].name.toLowerCase() === key) return boardGroups[i];
     }
-    knownGroups.push(name);
-    knownGroups.sort(function(a, b) { return a.localeCompare(b); });
+    return null;
+  }
+  function upsertBoardGroup(group) {
+    if (!group || !group.name) return;
+    var existing = findBoardGroup(group.name);
+    if (existing) {
+      existing.name = group.name;
+      existing.color = group.color != null ? group.color : existing.color;
+    } else {
+      boardGroups.push({ name: group.name, color: group.color != null ? group.color : null });
+    }
+    sortBoardGroups();
+  }
+  function removeBoardGroup(name) {
+    var key = String(name || '').toLowerCase();
+    for (var i = 0; i < boardGroups.length; i++) {
+      if (boardGroups[i].name.toLowerCase() === key) {
+        boardGroups.splice(i, 1);
+        return;
+      }
+    }
   }
 
   // --- Modal groups state ---
@@ -1184,40 +1376,122 @@ const kanbanClientJs = `
       x.addEventListener('click', function() {
         selectedGroups.splice(idx, 1);
         renderSelectedGroups();
-        rebuildGroupsDatalist();
       });
       c.appendChild(txt);
       c.appendChild(x);
       groupsChips.appendChild(c);
     });
-    rebuildGroupsDatalist();
   }
 
-  function addGroupFromInput() {
-    var v = groupsInput.value.trim();
-    if (!v) return;
-    if (v.length > 100) v = v.slice(0, 100);
-    var key = v.toLowerCase();
-    var dup = selectedGroups.some(function(g) { return g.toLowerCase() === key; });
-    if (!dup) {
-      selectedGroups.push(v);
-      learnGroup(v);
-      renderSelectedGroups();
+  // ── Per-card label picker (popover) ─────────────────────────────────
+  // Click the "+ Add label" button to open a list of every label on this
+  // board. Click a label chip to attach it; staff also get "+ New label"
+  // to mint a brand-new one (which fires create_group server-side first
+  // and only adds to selectedGroups after the broadcast confirms).
+  function isGroupSelected(name) {
+    var k = name.toLowerCase();
+    for (var i = 0; i < selectedGroups.length; i++) {
+      if (selectedGroups[i].toLowerCase() === k) return true;
     }
-    groupsInput.value = '';
-    groupsInput.focus();
+    return false;
   }
-
-  groupsAddBtn.addEventListener('click', addGroupFromInput);
-  groupsInput.addEventListener('keydown', function(e) {
+  function attachGroupToCard(name) {
+    if (isGroupSelected(name)) return;
+    selectedGroups.push(name);
+    renderSelectedGroups();
+    renderGroupsPopoverList();
+  }
+  function renderGroupsPopoverList() {
+    while (groupsPopoverList.firstChild) groupsPopoverList.removeChild(groupsPopoverList.firstChild);
+    var available = boardGroups.filter(function(g) { return !isGroupSelected(g.name); });
+    if (boardGroups.length === 0) {
+      groupsPopoverEmpty.hidden = false;
+    } else {
+      groupsPopoverEmpty.hidden = true;
+    }
+    available.forEach(function(g) {
+      var chip = document.createElement('span');
+      chip.className = 'kanban-chip';
+      chip.setAttribute('role', 'option');
+      chip.setAttribute('tabindex', '0');
+      var color = g.color || getGroupColorLocal(g.name);
+      if (color) {
+        chip.style.background = color + '33';
+        chip.style.border = '1px solid ' + color + '66';
+      }
+      chip.textContent = g.name;
+      function pick(ev) {
+        ev.preventDefault();
+        attachGroupToCard(g.name);
+      }
+      chip.addEventListener('click', pick);
+      chip.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') pick(e);
+      });
+      groupsPopoverList.appendChild(chip);
+    });
+    if (currentUser.isStaff) {
+      groupsPopoverNewBtn.hidden = false;
+    } else {
+      groupsPopoverNewBtn.hidden = true;
+    }
+  }
+  function openGroupsPopover() {
+    renderGroupsPopoverList();
+    groupsPopover.hidden = false;
+    groupsPopoverNewRow.hidden = true;
+    groupsPopoverNewName.value = '';
+    groupsPickBtn.setAttribute('aria-expanded', 'true');
+  }
+  function closeGroupsPopover() {
+    groupsPopover.hidden = true;
+    groupsPopoverNewRow.hidden = true;
+    groupsPickBtn.setAttribute('aria-expanded', 'false');
+  }
+  groupsPickBtn.addEventListener('click', function(ev) {
+    ev.stopPropagation();
+    if (groupsPopover.hidden) openGroupsPopover();
+    else closeGroupsPopover();
+  });
+  document.addEventListener('click', function(ev) {
+    if (groupsPopover.hidden) return;
+    if (groupsPopover.contains(ev.target) || ev.target === groupsPickBtn) return;
+    closeGroupsPopover();
+  });
+  groupsPopoverNewBtn.addEventListener('click', function() {
+    groupsPopoverNewRow.hidden = false;
+    groupsPopoverNewBtn.hidden = true;
+    groupsPopoverNewName.focus();
+  });
+  groupsPopoverCancel.addEventListener('click', function() {
+    groupsPopoverNewRow.hidden = true;
+    groupsPopoverNewBtn.hidden = false;
+  });
+  function submitNewLabelFromPicker() {
+    if (!currentUser.isStaff) return;
+    var v = groupsPopoverNewName.value.trim().slice(0, 64);
+    if (!v) return;
+    var existing = findBoardGroup(v);
+    if (existing) {
+      attachGroupToCard(existing.name);
+      closeGroupsPopover();
+      return;
+    }
+    // Pending: when the broadcast lands, attach the label.
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'create_group', name: v, attachAfter: true });
+    send({ type: 'create_group', clientMsgId: cmid, name: v });
+    closeGroupsPopover();
+  }
+  groupsPopoverCreate.addEventListener('click', submitNewLabelFromPicker);
+  groupsPopoverNewName.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      addGroupFromInput();
+      submitNewLabelFromPicker();
+    } else if (e.key === 'Escape') {
+      groupsPopoverNewRow.hidden = true;
+      groupsPopoverNewBtn.hidden = false;
     }
-  });
-  groupsInput.addEventListener('change', function() {
-    // The datalist fires 'change' when the user picks a suggestion.
-    if (groupsInput.value.trim()) addGroupFromInput();
   });
 
   function send(msg) {
@@ -1547,6 +1821,69 @@ const kanbanClientJs = `
   var savedFilters = [];
   var boardSlugForFilters = boardEl.getAttribute('data-board-slug') || '';
 
+  // ── Per-user column collapse state (localStorage, per-board) ────────
+  // Lion's "personal view" requirement: collapsing columns is a per-user
+  // preference that survives refresh. localStorage is sufficient — no
+  // cross-device sync was requested, and a per-board key avoids leaking
+  // collapse state from one board to another. The Set holds the names
+  // (column_name keys) that should render collapsed.
+  var COLLAPSE_KEY = 'kanban:v1:collapsed:' + boardSlugForFilters;
+  var collapsedCols = new Set();
+  try {
+    var collRaw = localStorage.getItem(COLLAPSE_KEY);
+    if (collRaw) {
+      JSON.parse(collRaw).forEach(function(n) { collapsedCols.add(n); });
+    }
+  } catch (_err) { /* localStorage may be unavailable in private mode */ }
+  function saveCollapsed() {
+    try {
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Array.from(collapsedCols)));
+    } catch (_err) { /* quota / disabled — silently degrade */ }
+  }
+  function applyCollapsedClasses() {
+    var sections = boardEl.querySelectorAll('.kanban-col[data-col]');
+    for (var i = 0; i < sections.length; i++) {
+      var name = sections[i].getAttribute('data-col');
+      sections[i].classList.toggle('kanban-col-collapsed', collapsedCols.has(name));
+    }
+  }
+  function toggleCollapsed(name) {
+    if (collapsedCols.has(name)) collapsedCols.delete(name);
+    else collapsedCols.add(name);
+    saveCollapsed();
+    applyCollapsedClasses();
+  }
+  // Apply collapsed state immediately on script start so SSR-rendered
+  // columns flip to their collapsed form before paint settles.
+  applyCollapsedClasses();
+  // Click delegation: any chevron in the column head toggles its column.
+  boardEl.addEventListener('click', function(ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('[data-col-collapse]');
+    if (!btn) return;
+    ev.stopPropagation();
+    toggleCollapsed(btn.getAttribute('data-col-collapse'));
+  });
+
+  // ── Column count cap (mirrored from server MAX_BOARD_COLUMNS) ───────
+  var MAX_BOARD_COLUMNS = 7;
+  try {
+    var mxRaw = document.getElementById('kanban-max-columns');
+    if (mxRaw && mxRaw.textContent) {
+      var n = parseInt(mxRaw.textContent, 10);
+      if (Number.isFinite(n) && n > 0) MAX_BOARD_COLUMNS = n;
+    }
+  } catch (_err) { /* keep default */ }
+  function currentColumnCount() {
+    return boardEl.querySelectorAll('.kanban-col[data-col]').length;
+  }
+  function updateAddColumnVisibility() {
+    var addSec = document.getElementById('kanban-col-add');
+    if (!addSec) return;
+    addSec.hidden = currentColumnCount() >= MAX_BOARD_COLUMNS;
+  }
+  // Initial pass — server-rendered columns may already be at the cap.
+  updateAddColumnVisibility();
+
   function renderSavedFilters() {
     while (savedFiltersBarEl.firstChild) savedFiltersBarEl.removeChild(savedFiltersBarEl.firstChild);
     if (savedFilters.length === 0) {
@@ -1764,6 +2101,169 @@ const kanbanClientJs = `
   templatesModalEl.addEventListener('click', function(e) {
     if (e.target === templatesModalEl) templatesModalEl.hidden = true;
   });
+
+  // ── Label manager (staff-only) ───────────────────────────────────────
+  // Modal shows every label on this board with its color, name, and a
+  // count of cards that use it. Edits propagate via WebSocket and the
+  // group_renamed / group_deleted broadcasts re-render the rest of the
+  // board. Per-label card counts arrive via list_groups (groups_snapshot).
+  var labelsManageBtn = document.getElementById('kf-manage-labels');
+  var labelsModalEl = document.getElementById('kanban-labels-modal');
+  var labelsListEl = document.getElementById('kl-list');
+  var labelsEmptyEl = document.getElementById('kl-empty');
+  var labelsCloseBtn = document.getElementById('kl-close');
+  var labelsNewName = document.getElementById('kl-new-name');
+  var labelsNewColorBtn = document.getElementById('kl-new-color');
+  var labelsNewAdd = document.getElementById('kl-new-add');
+  var labelCardCounts = {};
+  var labelsNewColorState = null;
+  function setLabelsNewColor(hex) {
+    labelsNewColorState = hex || null;
+    labelsNewColorBtn.style.background = labelsNewColorState || '#999999';
+  }
+
+  function renderLabelsManagerList() {
+    if (!labelsListEl) return;
+    while (labelsListEl.firstChild) labelsListEl.removeChild(labelsListEl.firstChild);
+    if (boardGroups.length === 0) {
+      if (labelsEmptyEl) labelsEmptyEl.hidden = false;
+      return;
+    }
+    if (labelsEmptyEl) labelsEmptyEl.hidden = true;
+    boardGroups.forEach(function(g) {
+      var li = document.createElement('li');
+      li.className = 'kl-row';
+      li.setAttribute('data-label-name', g.name);
+
+      var swatch = document.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'kl-color';
+      var liveColor = g.color || getGroupColorLocal(g.name) || '#999999';
+      swatch.style.background = liveColor;
+      swatch.title = 'Set color for "' + g.name + '"';
+      swatch.setAttribute('aria-label', 'Set color for label ' + g.name);
+      swatch.addEventListener('click', function() {
+        openWebSafeColorPicker({
+          anchor: swatch,
+          current: getGroupColorLocal(g.name) || '',
+          allowClear: true,
+          onChange: function(newColor) {
+            var cmid = nextClientMsgId();
+            pendingClientMsgs.set(cmid, { type: 'set_group_color', name: g.name });
+            send({ type: 'set_group_color', clientMsgId: cmid, name: g.name, color: newColor });
+          },
+        });
+      });
+      li.appendChild(swatch);
+
+      var nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.className = 'kl-name';
+      nameInput.value = g.name;
+      nameInput.maxLength = 64;
+      nameInput.setAttribute('aria-label', 'Rename label ' + g.name);
+      nameInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          nameInput.blur();
+        } else if (e.key === 'Escape') {
+          nameInput.value = g.name;
+          nameInput.blur();
+        }
+      });
+      nameInput.addEventListener('blur', function() {
+        var v = nameInput.value.trim().slice(0, 64);
+        if (!v || v === g.name) {
+          nameInput.value = g.name;
+          return;
+        }
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'rename_group', oldName: g.name, newName: v });
+        send({ type: 'rename_group', clientMsgId: cmid, oldName: g.name, newName: v });
+      });
+      li.appendChild(nameInput);
+
+      var count = document.createElement('span');
+      count.className = 'kl-count';
+      var c = labelCardCounts[g.name] || 0;
+      count.textContent = c === 1 ? '1 card' : c + ' cards';
+      li.appendChild(count);
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'kl-delete';
+      del.setAttribute('aria-label', 'Delete label ' + g.name);
+      del.title = 'Delete label';
+      del.textContent = '×';
+      del.addEventListener('click', function() {
+        var c2 = labelCardCounts[g.name] || 0;
+        var msg = c2 > 0
+          ? 'Delete label "' + g.name + '"? It will be removed from ' + c2 + ' card' + (c2 === 1 ? '' : 's') + '.'
+          : 'Delete label "' + g.name + '"?';
+        if (!confirm(msg)) return;
+        var cmid = nextClientMsgId();
+        pendingClientMsgs.set(cmid, { type: 'delete_group', name: g.name });
+        send({ type: 'delete_group', clientMsgId: cmid, name: g.name });
+      });
+      li.appendChild(del);
+
+      labelsListEl.appendChild(li);
+    });
+  }
+
+  function refreshLabelsManager() {
+    if (!currentUser.isStaff) return;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_groups' });
+    send({ type: 'list_groups', clientMsgId: cmid });
+  }
+
+  if (labelsManageBtn && labelsModalEl) {
+    labelsManageBtn.addEventListener('click', function() {
+      refreshLabelsManager();
+      renderLabelsManagerList();
+      labelsModalEl.hidden = false;
+    });
+    if (labelsCloseBtn) {
+      labelsCloseBtn.addEventListener('click', function() {
+        labelsModalEl.hidden = true;
+      });
+    }
+    labelsModalEl.addEventListener('click', function(e) {
+      if (e.target === labelsModalEl) labelsModalEl.hidden = true;
+    });
+    if (labelsNewColorBtn) {
+      labelsNewColorBtn.addEventListener('click', function() {
+        openWebSafeColorPicker({
+          anchor: labelsNewColorBtn,
+          current: labelsNewColorState,
+          allowClear: true,
+          onChange: setLabelsNewColor,
+        });
+      });
+    }
+    function submitNewLabel() {
+      var v = labelsNewName.value.trim().slice(0, 64);
+      if (!v) return;
+      var cmid = nextClientMsgId();
+      pendingClientMsgs.set(cmid, { type: 'create_group', name: v });
+      send({
+        type: 'create_group',
+        clientMsgId: cmid,
+        name: v,
+        color: labelsNewColorState,
+      });
+      labelsNewName.value = '';
+      setLabelsNewColor(null);
+    }
+    if (labelsNewAdd) labelsNewAdd.addEventListener('click', submitNewLabel);
+    if (labelsNewName) labelsNewName.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitNewLabel();
+      }
+    });
+  }
 
   saveTemplateBtn.addEventListener('click', function() {
     if (editingCardId === null) return;
@@ -2073,6 +2573,10 @@ const kanbanClientJs = `
     });
     // Re-bind direct click listeners on the rebuilt color swatches.
     if (typeof bindColumnColorButtons === 'function') bindColumnColorButtons();
+    // Re-apply per-user collapsed-column state on the freshly-built
+    // sections, and refresh the add-column visibility for the new total.
+    applyCollapsedClasses();
+    updateAddColumnVisibility();
   }
 
   function buildColumnSection(col) {
@@ -2086,6 +2590,15 @@ const kanbanClientJs = `
 
     var head = document.createElement('header');
     head.className = 'kanban-col-head';
+
+    var collapseBtn = document.createElement('button');
+    collapseBtn.type = 'button';
+    collapseBtn.className = 'kanban-col-collapse';
+    collapseBtn.setAttribute('data-col-collapse', col.columnName);
+    collapseBtn.setAttribute('aria-label', 'Collapse column ' + col.label);
+    collapseBtn.title = 'Collapse';
+    collapseBtn.textContent = '‹';
+    head.appendChild(collapseBtn);
 
     var title = document.createElement('span');
     title.className = 'kanban-col-title';
@@ -2274,6 +2787,13 @@ const kanbanClientJs = `
   var addColBtn = document.getElementById('kanban-add-col-btn');
   if (addColBtn) {
     addColBtn.addEventListener('click', function() {
+      // Hard cap: refuse client-side at MAX_BOARD_COLUMNS so we don't
+      // round-trip just to surface the same error. The server enforces
+      // the same cap, which the DO turns into a column_limit nack.
+      if (currentColumnCount() >= MAX_BOARD_COLUMNS) {
+        showToast('Boards are limited to ' + MAX_BOARD_COLUMNS + ' columns.', 4000);
+        return;
+      }
       var label = prompt('New column name?');
       if (label === null) return;
       label = label.trim();
@@ -2363,7 +2883,13 @@ const kanbanClientJs = `
         // Groups are now { name, color | null }; older snapshots may
         // still send raw strings — handle both for forward compat.
         var name = (g && typeof g === 'object') ? g.name : g;
-        var color = (g && typeof g === 'object') ? g.color : null;
+        // Read color from the live groupColors map first so that a
+        // group_color_updated broadcast triggers correct colors on every
+        // card after renderAll(), not just the one whose modal triggered
+        // the change. Fall back to the per-card snapshot for first paint
+        // and for older payload shapes.
+        var color = getGroupColorLocal(name)
+          || ((g && typeof g === 'object') ? g.color : null);
         var ch = chip(name);
         if (color) {
           ch.style.background = color + '33';
@@ -2395,6 +2921,32 @@ const kanbanClientJs = `
       notesEl.className = 'kanban-card-notes';
       renderMarkdownInto(card.notes, notesEl);
       el.appendChild(notesEl);
+    }
+
+    // Unread-comments indicator: shown when the server marked this card
+    // as having comments authored by another user that the viewer hasn't
+    // seen since their last view. Built via createElementNS rather than
+    // innerHTML to keep this otherwise inline-JS file XSS-safe by audit.
+    if (card.hasUnreadComments) {
+      var SVG_NS = 'http://www.w3.org/2000/svg';
+      var badge = document.createElement('span');
+      badge.className = 'kanban-card-unread';
+      badge.title = 'Unread comments';
+      badge.setAttribute('aria-label', 'Has unread comments');
+      var svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('width', '16');
+      svg.setAttribute('height', '16');
+      svg.setAttribute('fill', 'none');
+      svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '2');
+      svg.setAttribute('stroke-linecap', 'round');
+      svg.setAttribute('stroke-linejoin', 'round');
+      var path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z');
+      svg.appendChild(path);
+      badge.appendChild(svg);
+      el.appendChild(badge);
     }
 
     el.addEventListener('click', function() { openEditModal(card.id); });
@@ -2894,7 +3446,7 @@ const kanbanClientJs = `
     titleInput.value = '';
     selectedGroups = [];
     renderSelectedGroups();
-    groupsInput.value = '';
+    if (groupsPopover) groupsPopover.hidden = true;
     selectedAssignees = [];
     renderSelectedAssignees();
     assigneesInputEl.value = '';
@@ -2944,7 +3496,8 @@ const kanbanClientJs = `
       ? card.groups.map(function(g) { return (g && typeof g === 'object') ? g.name : g; })
       : [];
     renderSelectedGroups();
-    groupsInput.value = '';
+    // Picker popover stays closed when reopening the modal.
+    if (groupsPopover) groupsPopover.hidden = true;
     selectedAssignees = Array.isArray(card.assignees) ? card.assignees.slice() : [];
     renderSelectedAssignees();
     assigneesInputEl.value = '';
@@ -2979,6 +3532,20 @@ const kanbanClientJs = `
     formEl.dataset.column = card.column;
     modalEl.hidden = false;
     titleInput.focus();
+    // Mark this card as viewed for the current user. Clears the unread-
+    // comments dot on the tile both on this client (optimistically) and
+    // on the user's other open tabs (via the user-scoped card_view_marked
+    // broadcast). Skip for archived cards — they can't get new comments
+    // and we don't want to write a view-row for a tombstoned card.
+    if (!fromArchive && card.hasUnreadComments) {
+      card.hasUnreadComments = false;
+      upsertCard(card);
+    }
+    if (!fromArchive) {
+      var cmidView = nextClientMsgId();
+      pendingClientMsgs.set(cmidView, { type: 'mark_card_viewed', cardId: id });
+      send({ type: 'mark_card_viewed', clientMsgId: cmidView, cardId: id });
+    }
   }
 
   function closeModal() {
@@ -2998,8 +3565,8 @@ const kanbanClientJs = `
 
   formEl.addEventListener('submit', function(e) {
     e.preventDefault();
-    // Fold any unsubmitted typed group / assignee into their chip lists.
-    if (groupsInput.value.trim()) addGroupFromInput();
+    // Fold any unsubmitted typed assignee into the chip list. (Labels
+    // are added directly via the picker, not via a typing input.)
     if (assigneesInputEl.value.trim()) addAssigneeFromInput();
     var title = titleInput.value.trim();
     if (!title) { showFormError('Task Name is required.'); return; }
@@ -3245,10 +3812,21 @@ const kanbanClientJs = `
         if (Array.isArray(msg.columns)) {
           msg.columns.forEach(function(c) { columnConfig.set(c.columnName, c); });
         }
-        // Build group-color directory from every card we just received.
+        // Build group-color directory from the snapshot's per-board
+        // groups list (authoritative) plus any per-card colors. The
+        // snapshot now carries a top-level groups array; older
+        // snapshots without it fall back to scanning cards.
         groupColors.clear();
+        if (Array.isArray(msg.groups)) {
+          boardGroups = msg.groups.slice();
+          sortBoardGroups();
+          boardGroups.forEach(function(g) {
+            if (g && g.color) groupColors.set(groupColorKey(g.name), g.color);
+          });
+        }
         msg.cards.forEach(ingestGroupsFromCard);
         renderAll();
+        if (typeof updateAddColumnVisibility === 'function') updateAddColumnVisibility();
         // Deep-link from a notification: /kanban/<slug>?card=<id> auto-opens
         // that card's modal as soon as the snapshot lands. One-shot — strip
         // the query param so a refresh doesn't keep re-opening the modal.
@@ -3355,6 +3933,26 @@ const kanbanClientJs = `
         renderCommentsList();
         return;
       case 'comment_created':
+        // Mark the card as having an unread comment whenever someone
+        // *else* posts and the viewer doesn't currently have that card's
+        // modal open. Optimistic; the next refresh confirms via the
+        // server-computed hasUnreadComments flag in the snapshot.
+        if (msg.comment && msg.comment.authorUserId !== currentUser.id) {
+          var targetCard = cards.get(msg.comment.cardId);
+          if (targetCard) {
+            var modalOpenForThisCard = !modalEl.hidden && editingCardId === msg.comment.cardId;
+            if (modalOpenForThisCard) {
+              // The user is staring at the card; treat the comment as
+              // already seen. mark_card_viewed will fire below.
+              var cmidView = nextClientMsgId();
+              pendingClientMsgs.set(cmidView, { type: 'mark_card_viewed', cardId: msg.comment.cardId });
+              send({ type: 'mark_card_viewed', clientMsgId: cmidView, cardId: msg.comment.cardId });
+            } else if (!targetCard.hasUnreadComments) {
+              targetCard.hasUnreadComments = true;
+              upsertCard(targetCard);
+            }
+          }
+        }
         // A comment may be created on any card; only render if the modal
         // is showing that card. Append to thread (oldest-first ordering)
         // and clear the composer if this client posted it.
@@ -3465,10 +4063,122 @@ const kanbanClientJs = `
       case 'group_color_updated':
         if (msg.group && msg.group.name) {
           setGroupColorLocal(msg.group.name, msg.group.color);
+          // Mirror into boardGroups so the picker / manager show the new
+          // color too.
+          var bg1 = findBoardGroup(msg.group.name);
+          if (bg1) bg1.color = msg.group.color;
           // Re-render the board (chips on cards) and the modal's chip
           // list if it's currently open.
           renderAll();
           if (!modalEl.hidden) renderSelectedGroups();
+          if (labelsModalEl && !labelsModalEl.hidden) renderLabelsManagerList();
+        }
+        return;
+      case 'group_created':
+        if (msg.group && msg.group.name) {
+          upsertBoardGroup(msg.group);
+          if (msg.group.color) setGroupColorLocal(msg.group.name, msg.group.color);
+          // If the picker is open and we were waiting on this create
+          // (staff just clicked "+ New label" and submitted), attach the
+          // newly-minted label to the open card now that it exists.
+          var pendings = pendingClientMsgs;
+          if (msg.clientMsgId && pendings && pendings.has(msg.clientMsgId)) {
+            // (Server doesn't echo clientMsgId on broadcasts; this branch
+            // is harmless and future-compatible.)
+          }
+          // Heuristic for the picker flow: if any pending create_group
+          // had attachAfter, attach now. Walk all pendings and clear.
+          pendings.forEach(function(meta, k) {
+            if (meta && meta.type === 'create_group' && meta.attachAfter && meta.name && meta.name.toLowerCase() === msg.group.name.toLowerCase()) {
+              attachGroupToCard(msg.group.name);
+              pendings.delete(k);
+            }
+          });
+          if (labelsModalEl && !labelsModalEl.hidden) renderLabelsManagerList();
+          if (groupsPopover && !groupsPopover.hidden) renderGroupsPopoverList();
+        }
+        return;
+      case 'group_renamed':
+        if (msg.oldName && msg.group && msg.group.name) {
+          // Update every card's stored group name in place. The chip
+          // colors come from groupColors which we update below; no need
+          // to mutate each card's per-snapshot color field.
+          var oldKey = msg.oldName.toLowerCase();
+          cards.forEach(function(c) {
+            if (Array.isArray(c.groups)) {
+              for (var gi = 0; gi < c.groups.length; gi++) {
+                var entry = c.groups[gi];
+                var entryName = (entry && typeof entry === 'object') ? entry.name : entry;
+                if (String(entryName || '').toLowerCase() === oldKey) {
+                  if (entry && typeof entry === 'object') {
+                    entry.name = msg.group.name;
+                  } else {
+                    c.groups[gi] = msg.group.name;
+                  }
+                }
+              }
+            }
+          });
+          // Move the color over and update boardGroups.
+          var prevColor = getGroupColorLocal(msg.oldName);
+          setGroupColorLocal(msg.oldName, null);
+          if (msg.group.color || prevColor) {
+            setGroupColorLocal(msg.group.name, msg.group.color || prevColor);
+          }
+          removeBoardGroup(msg.oldName);
+          upsertBoardGroup(msg.group);
+          // Update selectedGroups in the open modal too.
+          for (var sgi = 0; sgi < selectedGroups.length; sgi++) {
+            if (selectedGroups[sgi].toLowerCase() === oldKey) {
+              selectedGroups[sgi] = msg.group.name;
+            }
+          }
+          renderAll();
+          if (!modalEl.hidden) renderSelectedGroups();
+          if (labelsModalEl && !labelsModalEl.hidden) renderLabelsManagerList();
+          if (groupsPopover && !groupsPopover.hidden) renderGroupsPopoverList();
+        }
+        return;
+      case 'group_deleted':
+        if (msg.name) {
+          var delKey = msg.name.toLowerCase();
+          cards.forEach(function(c) {
+            if (Array.isArray(c.groups)) {
+              c.groups = c.groups.filter(function(entry) {
+                var entryName = (entry && typeof entry === 'object') ? entry.name : entry;
+                return String(entryName || '').toLowerCase() !== delKey;
+              });
+            }
+          });
+          setGroupColorLocal(msg.name, null);
+          removeBoardGroup(msg.name);
+          // Remove from selectedGroups too.
+          selectedGroups = selectedGroups.filter(function(g) { return g.toLowerCase() !== delKey; });
+          renderAll();
+          if (!modalEl.hidden) renderSelectedGroups();
+          if (labelsModalEl && !labelsModalEl.hidden) renderLabelsManagerList();
+          if (groupsPopover && !groupsPopover.hidden) renderGroupsPopoverList();
+        }
+        return;
+      case 'groups_snapshot':
+        // Response to list_groups (label manager opening).
+        if (Array.isArray(msg.groups)) {
+          boardGroups = msg.groups.slice();
+          sortBoardGroups();
+          boardGroups.forEach(function(g) {
+            if (g.color) setGroupColorLocal(g.name, g.color);
+          });
+        }
+        labelCardCounts = msg.counts && typeof msg.counts === 'object' ? msg.counts : {};
+        if (labelsModalEl && !labelsModalEl.hidden) renderLabelsManagerList();
+        return;
+      case 'card_view_marked':
+        if (msg.userId === currentUser.id) {
+          var v = cards.get(msg.cardId);
+          if (v && v.hasUnreadComments) {
+            v.hasUnreadComments = false;
+            upsertCard(v);
+          }
         }
         return;
       case 'templates_snapshot':
@@ -3503,7 +4213,10 @@ const kanbanClientJs = `
         // Column-management nacks aren't modal-bound, so route them to
         // toast messages with reason-specific text.
         if (pending && (pending.type === 'add_column' || pending.type === 'rename_column' || pending.type === 'delete_column' || pending.type === 'move_column')) {
-          if (msg.reason === 'has_cards') {
+          if (msg.reason === 'column_limit') {
+            var lim = (typeof msg.limit === 'number') ? msg.limit : MAX_BOARD_COLUMNS;
+            showToast('Boards are limited to ' + lim + ' columns.', 5000);
+          } else if (msg.reason === 'has_cards') {
             showToast('Can’t delete a column that still has cards — move or archive them first.', 5000);
           } else if (msg.reason === 'last_column') {
             showToast('Can’t delete the last remaining column on a board.', 5000);

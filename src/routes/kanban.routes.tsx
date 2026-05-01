@@ -37,7 +37,8 @@ import {
   listActiveUserDirectory,
   listAttachments,
   listBoardColumns,
-  listDistinctGroupNames,
+  listGroupsForBoard,
+  MAX_BOARD_COLUMNS,
 } from '../services/kanban.service';
 import { markNotificationsRead } from '../services/notifications.service';
 import { writeAudit } from '../services/audit.service';
@@ -251,8 +252,8 @@ kanbanRoutes.get('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  const [knownGroups, knownUsers, columns] = await Promise.all([
-    listDistinctGroupNames(c.env.DB),
+  const [boardGroups, knownUsers, columns] = await Promise.all([
+    listGroupsForBoard(c.env.DB, board.id),
     listActiveUserDirectory(c.env.DB),
     listBoardColumns(c.env.DB, board.id),
   ]);
@@ -260,9 +261,10 @@ kanbanRoutes.get('/:slug', async (c) => {
     <KanbanPage
       user={user}
       board={board}
-      knownGroups={knownGroups}
+      boardGroups={boardGroups}
       knownUsers={knownUsers}
       columns={columns}
+      maxBoardColumns={MAX_BOARD_COLUMNS}
     />
   );
 });

@@ -21,13 +21,17 @@ import type { Env } from '../env';
 import {
   addBoardColumn,
   archiveCard,
+  countCardsPerGroup,
   createCard,
   createChecklistItem,
   createComment,
+  createGroup,
   deleteCard,
   deleteChecklistItem,
   deleteComment,
+  deleteGroup,
   getComment,
+  KanbanColumnLimitError,
   listActiveUserDirectory,
   listArchivedCards,
   listBoardColumns,
@@ -35,10 +39,13 @@ import {
   listCards,
   listChecklistItems,
   listComments,
+  listGroupsForBoard,
   logCardEvent,
+  markCardViewed,
   moveCard,
   removeBoardColumn,
   renameBoardColumn,
+  renameGroup,
   reorderBoardColumns,
   setColumnColor,
   setColumnWipLimit,
@@ -289,6 +296,39 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     color: colorSchema,
   }),
   z.object({
+    // Staff+ creates a new label on this board. Idempotent + NOCASE-safe.
+    type: z.literal('create_group'),
+    clientMsgId: z.string().max(64),
+    name: z.string().min(1).max(MAX_FIELD),
+    color: colorSchema.optional(),
+  }),
+  z.object({
+    // Staff+ renames a label everywhere it appears on this board.
+    type: z.literal('rename_group'),
+    clientMsgId: z.string().max(64),
+    oldName: z.string().min(1).max(MAX_FIELD),
+    newName: z.string().min(1).max(MAX_FIELD),
+  }),
+  z.object({
+    // Staff+ deletes a label, detaching it from every card on this board.
+    type: z.literal('delete_group'),
+    clientMsgId: z.string().max(64),
+    name: z.string().min(1).max(MAX_FIELD),
+  }),
+  z.object({
+    // Staff+ requests the per-board label palette + per-label card counts
+    // for the manager modal.
+    type: z.literal('list_groups'),
+    clientMsgId: z.string().max(64),
+  }),
+  z.object({
+    // Mark the caller's last_viewed_at on a card to clear the unread-
+    // comments dot. Idempotent. Fires when the user opens a card modal.
+    type: z.literal('mark_card_viewed'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
+  }),
+  z.object({
     type: z.literal('list_templates'),
     clientMsgId: z.string().max(64),
   }),
@@ -386,12 +426,20 @@ export class KanbanBoardDO extends DurableObject<Env> {
     server.serializeAttachment(attachment);
 
     // Send initial snapshot for this board. If this throws, the socket will close.
-    const [cards, columns] = await Promise.all([
-      listCards(this.env.DB, boardId),
+    // listCards is called with the viewer's userId so per-user
+    // hasUnreadComments flags are correct on first paint.
+    const [cards, columns, groups] = await Promise.all([
+      listCards(this.env.DB, boardId, userId),
       listBoardColumns(this.env.DB, boardId),
+      listGroupsForBoard(this.env.DB, boardId),
     ]);
     server.send(
-      JSON.stringify({ type: 'snapshot', cards: cards.map(cardToDto), columns })
+      JSON.stringify({
+        type: 'snapshot',
+        cards: cards.map(cardToDto),
+        columns,
+        groups,
+      })
     );
 
     return new Response(null, { status: 101, webSocket: client });
@@ -427,22 +475,31 @@ export class KanbanBoardDO extends DurableObject<Env> {
     try {
       switch (parsed.type) {
         case 'hello': {
-          const [cards, columns] = await Promise.all([
-            listCards(this.env.DB, attachment.boardId),
+          const [cards, columns, groups] = await Promise.all([
+            listCards(this.env.DB, attachment.boardId, attachment.userId),
             listBoardColumns(this.env.DB, attachment.boardId),
+            listGroupsForBoard(this.env.DB, attachment.boardId),
           ]);
-          this.sendTo(ws, { type: 'snapshot', cards, columns });
+          this.sendTo(ws, { type: 'snapshot', cards, columns, groups });
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'create_card': {
+          // Non-staff users can only attach labels that already exist on
+          // this board — they cannot mint new ones via card edits. Staff
+          // (and admin) can still implicitly create via the same path.
+          const filteredGroups = await this.filterAttachableGroups(
+            attachment.boardId,
+            attachment.isStaff,
+            parsed.groups
+          );
           const card = await createCard(
             this.env.DB,
             attachment.boardId,
             {
               column: parsed.column,
               title: parsed.title,
-              groups: parsed.groups,
+              groups: filteredGroups,
               assigneeUserIds: parsed.assigneeUserIds,
               assigned: parsed.assigned ?? null,
               notes: parsed.notes ?? null,
@@ -488,12 +545,25 @@ export class KanbanBoardDO extends DurableObject<Env> {
           // Normalize coverColor in the patch before persisting so the
           // canonical #aabbcc form is what hits the DB regardless of
           // whether the client sent #abc.
-          const normalizedPatch = parsed.patch.coverColor !== undefined
+          let normalizedPatch = parsed.patch.coverColor !== undefined
             ? {
                 ...parsed.patch,
                 coverColor: parsed.patch.coverColor ? normalizeHexColor(parsed.patch.coverColor) : null,
               }
             : parsed.patch;
+          // Same staff-only label-creation gate as create_card — strip
+          // any group names that don't already exist on this board when
+          // the caller isn't staff.
+          if (normalizedPatch.groups !== undefined) {
+            normalizedPatch = {
+              ...normalizedPatch,
+              groups: await this.filterAttachableGroups(
+                attachment.boardId,
+                attachment.isStaff,
+                normalizedPatch.groups
+              ),
+            };
+          }
           const updated = await updateCard(
             this.env.DB,
             parsed.id,
@@ -783,12 +853,26 @@ export class KanbanBoardDO extends DurableObject<Env> {
             this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
             return;
           }
-          const config = await addBoardColumn(
-            this.env.DB,
-            attachment.boardId,
-            parsed.key,
-            parsed.label
-          );
+          let config;
+          try {
+            config = await addBoardColumn(
+              this.env.DB,
+              attachment.boardId,
+              parsed.key,
+              parsed.label
+            );
+          } catch (err) {
+            if (err instanceof KanbanColumnLimitError) {
+              this.sendTo(ws, {
+                type: 'nack',
+                clientMsgId: parsed.clientMsgId,
+                reason: 'column_limit',
+                limit: err.limit,
+              });
+              return;
+            }
+            throw err;
+          }
           if (!config) {
             this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
             return;
@@ -966,6 +1050,91 @@ export class KanbanBoardDO extends DurableObject<Env> {
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
+        case 'create_group': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
+          const group = await createGroup(
+            this.env.DB,
+            attachment.boardId,
+            parsed.name,
+            norm ?? null
+          );
+          if (!group) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({ type: 'group_created', group });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'rename_group': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const result = await renameGroup(
+            this.env.DB,
+            attachment.boardId,
+            parsed.oldName,
+            parsed.newName
+          );
+          if (!result) {
+            // null covers: empty input, no-op (same name), missing source,
+            // or NOCASE collision with a different existing label.
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
+            return;
+          }
+          this.broadcast({
+            type: 'group_renamed',
+            oldName: result.old,
+            group: result.group,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'delete_group': {
+          if (!attachment.isStaff) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
+            return;
+          }
+          const ok = await deleteGroup(
+            this.env.DB,
+            attachment.boardId,
+            parsed.name
+          );
+          if (!ok) {
+            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
+            return;
+          }
+          this.broadcast({ type: 'group_deleted', name: parsed.name });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'list_groups': {
+          const [groups, counts] = await Promise.all([
+            listGroupsForBoard(this.env.DB, attachment.boardId),
+            countCardsPerGroup(this.env.DB, attachment.boardId),
+          ]);
+          this.sendTo(ws, { type: 'groups_snapshot', groups, counts });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
+        case 'mark_card_viewed': {
+          await markCardViewed(this.env.DB, attachment.userId, parsed.cardId);
+          // User-scoped fanout: only the same user's other open sockets
+          // should clear their unread dot. Other users' sockets keep
+          // their own per-user state.
+          this.broadcastToUser(attachment.userId, {
+            type: 'card_view_marked',
+            cardId: parsed.cardId,
+            userId: attachment.userId,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          return;
+        }
         case 'set_wip_limit': {
           if (!attachment.isStaff) {
             this.sendTo(ws, {
@@ -1140,6 +1309,27 @@ export class KanbanBoardDO extends DurableObject<Env> {
     this.broadcast({ type: 'card_event', event });
   }
 
+  /**
+   * Strip group names from an inbound card patch when the user isn't
+   * staff and the name doesn't yet exist as a kanban_groups row for this
+   * board. This is the server-side gate for the staff-only label-
+   * creation policy: non-staff can attach existing labels but can't mint
+   * new ones via card edits, even if a malicious client sends fresh
+   * names. Staff requests pass through unchanged. Empty / undefined
+   * input returns input unchanged.
+   */
+  private async filterAttachableGroups(
+    boardId: number,
+    isStaff: boolean,
+    groups: string[] | undefined
+  ): Promise<string[] | undefined> {
+    if (!groups || groups.length === 0) return groups;
+    if (isStaff) return groups;
+    const existing = await listGroupsForBoard(this.env.DB, boardId);
+    const allowed = new Set(existing.map((g) => g.name.toLowerCase()));
+    return groups.filter((g) => allowed.has(g.trim().toLowerCase()));
+  }
+
   private async readVersion(id: number): Promise<number | null> {
     const row = await this.env.DB.prepare(
       `SELECT version FROM kanban_cards WHERE id = ?`
@@ -1160,6 +1350,22 @@ export class KanbanBoardDO extends DurableObject<Env> {
   private broadcast(payload: unknown): void {
     const json = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(json);
+      } catch {
+        // Dead socket
+      }
+    }
+  }
+
+  /** Send to every socket currently attached for a single user.
+   *  Used for per-user notifications (e.g. clearing the unread-comments
+   *  dot on the user's other open tabs after they view a card). */
+  private broadcastToUser(userId: number, payload: unknown): void {
+    const json = JSON.stringify(payload);
+    for (const ws of this.ctx.getWebSockets()) {
+      const att = (ws.deserializeAttachment() as SocketAttachment | null) ?? null;
+      if (!att || att.userId !== userId) continue;
       try {
         ws.send(json);
       } catch {
