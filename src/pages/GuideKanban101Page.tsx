@@ -107,7 +107,20 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               </li>
               <li>
                 <strong>Add</strong> a new column with the
-                <code> + Add column</code> tile at the right edge.
+                <code> + Add column</code> tile at the right edge. Boards are
+                capped at 7 columns; the tile hides itself at the limit.
+              </li>
+              <li>
+                <strong>Collapse</strong> a column with the <code>‹</code>
+                chevron in its header to shrink it to a thin vertical strip
+                while still showing the card count. Click again to expand.
+                Collapse state is per-user and per-board, saved in your
+                browser, so it survives a refresh.
+              </li>
+              <li>
+                <strong>Scroll</strong>: when there are more columns than
+                fit your window, the board itself scrolls horizontally —
+                columns never wrap to a second row.
               </li>
               <li>
                 <strong>WIP limit</strong>: click the count badge in a column
@@ -140,7 +153,12 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               <li><strong>Title</strong> and notes (Markdown is supported in notes).</li>
               <li><strong>Assignees</strong> — one or more team members.</li>
               <li><strong>Start &amp; due dates</strong>, with optional due time.</li>
-              <li><strong>Labels</strong> — short colored tags shared across the board.</li>
+              <li>
+                <strong>Labels</strong> — short colored tags shared across
+                the whole board. Click <code>+ Add label</code> on a card to
+                pick from the board's existing labels. Renaming or recoloring
+                a label updates every card that uses it.
+              </li>
               <li><strong>Cover color</strong> for at-a-glance scanning.</li>
               <li><strong>Checklists</strong>, <strong>attachments</strong>, and threaded <strong>comments</strong>.</li>
             </ul>
@@ -149,6 +167,20 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               to reorder it. To get rid of a card, archive it from the card
               modal — the archive drawer keeps it around in case you change
               your mind.
+            </p>
+            <p>
+              When someone else comments on a card you haven't opened
+              recently, a small speech-bubble icon appears in the corner of
+              that card's tile on the board. Open the card to clear it. Your
+              own comments don't trigger the indicator.
+            </p>
+            <p>
+              <strong>Managing labels (staff):</strong> the
+              <code>Manage labels</code> button in the toolbar opens a
+              dedicated panel where staff can rename, recolor, or delete
+              labels for the whole board. Editors can attach existing labels
+              to cards but can't create brand-new ones — that keeps the
+              label set tidy and consistent across cards.
             </p>
             <aside class="guide-tip">
               <strong>Pro tip:</strong> <code>@mention</code> a teammate in
