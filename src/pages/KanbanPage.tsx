@@ -541,8 +541,14 @@ const kanbanCss = `
   .kanban-add:hover { background: rgba(128,128,128,0.15); }
   .kanban-col-body { flex: 1; min-height: 40px; }
 
+  /* Card background must be opaque in both themes so the column's
+   * accent tint (added 2026-05) sits BEHIND cards rather than bleeding
+   * through them. The previous near-transparent dark default
+   * (rgba(255,255,255,0.03)) made the column color show through every
+   * card body. */
   .kanban-card {
-    background: var(--kanban-card-bg, rgba(255,255,255,0.03));
+    background: #fff;
+    color: #111;
     border: 1px solid rgba(128,128,128,0.3);
     border-radius: 6px;
     padding: 8px 10px;
@@ -550,8 +556,8 @@ const kanbanCss = `
     cursor: pointer;
     font-size: 0.9em;
   }
-  @media (prefers-color-scheme: light) {
-    .kanban-card { background: #fff; }
+  @media (prefers-color-scheme: dark) {
+    .kanban-card { background: #1a1a1a; color: #eee; }
   }
   .kanban-card:hover { border-color: rgba(128,128,128,0.6); }
 
@@ -911,7 +917,10 @@ const kanbanCss = `
   .kanban-card-unread::after {
     content: ''; position: absolute; top: -2px; right: -2px;
     width: 8px; height: 8px; border-radius: 50%;
-    background: #ef4444; border: 2px solid var(--bg, #fff);
+    background: #ef4444; border: 2px solid #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kanban-card-unread::after { border-color: #1a1a1a; }
   }
 
   /* Group/label chip — when a color is set, the chip background uses
@@ -955,14 +964,21 @@ const kanbanCss = `
   .kf-groups-entry input { flex: 1; }
 
   /* Per-card label picker popover. Replaces the older free-text input;
-   * the "+ New label" affordance only renders for staff. */
+   * the "+ New label" affordance only renders for staff. Background
+   * uses the same explicit light/dark pair as .kanban-modal-inner —
+   * this codebase doesn't define a --bg variable, so the older
+   * var(--bg, #fff) fallback rendered a white popover in dark mode and
+   * washed out every label chip. */
   .kf-groups-popover {
     position: absolute; top: 100%; left: 0; z-index: 70;
     margin-top: 4px; min-width: 220px; max-width: 320px;
     max-height: 280px; overflow: auto;
-    background: var(--bg, #fff); color: inherit;
+    background: #fff; color: #111;
     border: 1px solid rgba(128,128,128,0.3); border-radius: 8px;
     box-shadow: 0 6px 20px rgba(0,0,0,0.15); padding: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kf-groups-popover { background: #1a1a1a; color: #eee; }
   }
   .kf-groups-popover-list { display: flex; flex-direction: column; gap: 4px; }
   .kf-groups-popover-list .kanban-chip {
