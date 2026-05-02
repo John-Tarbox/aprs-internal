@@ -1092,6 +1092,18 @@ export class KanbanBoardDO extends DurableObject<Env> {
             oldName: result.old,
             group: result.group,
           });
+          // Per-card audit trail: each card whose label name just
+          // changed gets a card.updated event so the activity timeline
+          // explains where the rename came from. Bounded by N cards
+          // on this board that used the old label.
+          for (const cardId of result.affectedCardIds) {
+            await this.emitCardEvent(cardId, attachment.userId, 'card.updated', {
+              changedFields: ['groups'],
+              labelOp: 'renamed',
+              oldName: result.old,
+              newName: result.group.name,
+            });
+          }
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
@@ -1100,16 +1112,25 @@ export class KanbanBoardDO extends DurableObject<Env> {
             this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
             return;
           }
-          const ok = await deleteGroup(
+          const result = await deleteGroup(
             this.env.DB,
             attachment.boardId,
             parsed.name
           );
-          if (!ok) {
+          if (!result.ok) {
             this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
             return;
           }
           this.broadcast({ type: 'group_deleted', name: parsed.name });
+          // Audit trail: each card that just lost the label gets a
+          // card.updated event explaining why its groups changed.
+          for (const cardId of result.affectedCardIds) {
+            await this.emitCardEvent(cardId, attachment.userId, 'card.updated', {
+              changedFields: ['groups'],
+              labelOp: 'deleted',
+              labelName: parsed.name,
+            });
+          }
           this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }

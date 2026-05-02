@@ -630,7 +630,7 @@ export async function renameGroup(
   boardId: number,
   oldName: string,
   newName: string
-): Promise<{ old: string; group: GroupDto } | null> {
+): Promise<{ old: string; group: GroupDto; affectedCardIds: number[] } | null> {
   const oldTrimmed = oldName.trim();
   const newTrimmed = newName.trim().slice(0, 64);
   if (!oldTrimmed || !newTrimmed) return null;
@@ -655,6 +655,18 @@ export async function renameGroup(
     .bind(boardId, newTrimmed, oldTrimmed)
     .first<{ name: string }>();
   if (collision) return null;
+  // Capture the card IDs the rename will touch so the DO can fan out
+  // per-card audit events. Runs before the batch — the batch's UPDATE
+  // would otherwise have already changed group_name when we read it.
+  const affected = await db
+    .prepare(
+      `SELECT card_id FROM kanban_card_groups
+       WHERE group_name = ?
+         AND card_id IN (SELECT id FROM kanban_cards WHERE board_id = ?)`
+    )
+    .bind(oldTrimmed, boardId)
+    .all<{ card_id: number }>();
+  const affectedCardIds = (affected.results ?? []).map((r) => r.card_id);
   await db.batch([
     db
       .prepare(
@@ -673,7 +685,7 @@ export async function renameGroup(
       .prepare(`DELETE FROM kanban_groups WHERE board_id = ? AND name = ?`)
       .bind(boardId, oldTrimmed),
   ]);
-  return { old: oldTrimmed, group: { name: newTrimmed, color: src.color } };
+  return { old: oldTrimmed, group: { name: newTrimmed, color: src.color }, affectedCardIds };
 }
 
 /**
@@ -686,14 +698,25 @@ export async function deleteGroup(
   db: D1Database,
   boardId: number,
   name: string
-): Promise<boolean> {
+): Promise<{ ok: boolean; affectedCardIds: number[] }> {
   const trimmed = name.trim();
-  if (!trimmed) return false;
+  if (!trimmed) return { ok: false, affectedCardIds: [] };
   const exists = await db
     .prepare(`SELECT 1 as ok FROM kanban_groups WHERE board_id = ? AND name = ? LIMIT 1`)
     .bind(boardId, trimmed)
     .first<{ ok: number }>();
-  if (!exists) return false;
+  if (!exists) return { ok: false, affectedCardIds: [] };
+  // Capture card IDs before the DELETE so the DO can emit per-card
+  // audit events for each card that just lost the label.
+  const affected = await db
+    .prepare(
+      `SELECT card_id FROM kanban_card_groups
+       WHERE group_name = ?
+         AND card_id IN (SELECT id FROM kanban_cards WHERE board_id = ?)`
+    )
+    .bind(trimmed, boardId)
+    .all<{ card_id: number }>();
+  const affectedCardIds = (affected.results ?? []).map((r) => r.card_id);
   await db.batch([
     db
       .prepare(
@@ -706,7 +729,7 @@ export async function deleteGroup(
       .prepare(`DELETE FROM kanban_groups WHERE board_id = ? AND name = ?`)
       .bind(boardId, trimmed),
   ]);
-  return true;
+  return { ok: true, affectedCardIds };
 }
 
 /**

@@ -1880,6 +1880,25 @@ const kanbanClientJs = `
     toggleCollapsed(btn.getAttribute('data-col-collapse'));
   });
 
+  // ── Auto-expand collapsed columns during a drag ─────────────────────
+  // Set by Sortable's onStart/onEnd on both card and column instances.
+  // Without this, a card dragged toward a collapsed column hits a
+  // display:none body and can't drop. Expanding the column on hover
+  // gives Sortable a real drop target. The expansion sticks (we save
+  // it to localStorage) — the user can re-collapse afterward; auto-
+  // recollapsing on drop would feel like the column disappeared.
+  var isDragging = false;
+  boardEl.addEventListener('dragover', function(ev) {
+    if (!isDragging) return;
+    var col = ev.target && ev.target.closest && ev.target.closest('.kanban-col');
+    if (!col || !col.classList.contains('kanban-col-collapsed')) return;
+    var name = col.getAttribute('data-col');
+    if (!name) return;
+    collapsedCols.delete(name);
+    saveCollapsed();
+    applyCollapsedClasses();
+  });
+
   // ── Column count cap (mirrored from server MAX_BOARD_COLUMNS) ───────
   var MAX_BOARD_COLUMNS = 7;
   try {
@@ -3757,7 +3776,9 @@ const kanbanClientJs = `
         animation: 150,
         ghostClass: 'sortable-ghost',
         dragClass: 'sortable-drag',
+        onStart: function() { isDragging = true; },
         onEnd: function(evt) {
+          isDragging = false;
           var cardId = parseInt(evt.item.getAttribute('data-card-id'), 10);
           var toColumn = evt.to.getAttribute('data-col-body');
           var toPosition = evt.newIndex;
@@ -3793,10 +3814,12 @@ const kanbanClientJs = `
         animation: 150,
         draggable: '.kanban-col',
         handle: '.kanban-col-head',
-        filter: '.kanban-col-title, .kanban-col-color, .kanban-col-del, .kanban-add, .kanban-col-count',
+        filter: '.kanban-col-title, .kanban-col-color, .kanban-col-del, .kanban-add, .kanban-col-count, .kanban-col-collapse',
         preventOnFilter: false,
         ghostClass: 'sortable-col-ghost',
+        onStart: function() { isDragging = true; },
         onEnd: function() {
+          isDragging = false;
           var order = Array.prototype.slice
             .call(boardEl.querySelectorAll('.kanban-col'))
             .map(function(s) { return s.getAttribute('data-col'); })
@@ -4062,6 +4085,14 @@ const kanbanClientJs = `
       case 'column_removed':
         if (msg.column) {
           columnConfig.delete(msg.column);
+          // Drop any stale collapsed-state for this column from the
+          // per-user persisted Set; without this prune the localStorage
+          // entry grows indefinitely and a future column re-created with
+          // the same key would render unexpectedly collapsed.
+          if (collapsedCols.has(msg.column)) {
+            collapsedCols.delete(msg.column);
+            saveCollapsed();
+          }
           rebuildBoardStructure();
           renderAll();
         }
