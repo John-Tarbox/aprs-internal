@@ -17,7 +17,7 @@ import { beginLogin, handleCallback, stateCookieName, type OidcProviderConfig } 
 import { verifyIdToken } from '../services/jwks.service';
 import { parseCookies, serializeCookie, signValue, clearCookieSerialized } from '../services/cookie.service';
 import { createSession, revokeSession, touchLastLogin } from '../services/session.service';
-import { findUserByEmail, insertUser, setUserRoles } from '../services/users.service';
+import { findUserByEmail, getUserRoles, insertUser, setUserRoles } from '../services/users.service';
 import { writeAudit } from '../services/audit.service';
 import { SESSION_COOKIE_NAME } from '../middleware/auth';
 
@@ -197,6 +197,49 @@ authRoutes.get('/okta/callback', async (c) => {
       return c.redirect(`/access-denied?reason=${encodeURIComponent('Your account has been deactivated. Contact an admin.')}`, 302);
     }
 
+    // MCP / Claude.ai connector flow: when /authorize stashed the OAuth
+    // AuthRequest in the OIDC state cookie, finish by minting an OAuth
+    // grant + redirecting back to the connector's redirect_uri instead of
+    // creating a regular browser session for the dashboard. The user's
+    // identity is now confirmed via Okta; we hand it to the OAuthProvider.
+    if (result.mcpAuthRequest) {
+      try {
+        const authReq = JSON.parse(result.mcpAuthRequest) as Parameters<
+          typeof c.env.OAUTH_PROVIDER.completeAuthorization
+        >[0]['request'];
+        const userRoles = await getUserRoles(c.env.DB, user.id);
+        const isAdmin = userRoles.includes('admin');
+        const isStaff = isAdmin || userRoles.includes('staff');
+        const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
+          request: authReq,
+          userId: String(user.id),
+          metadata: { email, displayName: user.displayName ?? null },
+          scope: authReq.scope,
+          props: {
+            userId: user.id,
+            email,
+            displayName: user.displayName ?? null,
+            isStaff,
+            isAdmin,
+          },
+        });
+        await touchLastLogin(c.env.DB, user.id);
+        await writeAudit(c.env.DB, {
+          userId: user.id,
+          action: 'login.okta.mcp',
+          metadata: { clientId: authReq.clientId },
+          ip: getClientIp(c),
+        });
+        return c.redirect(redirectTo, 302);
+      } catch (err) {
+        console.error('mcp completeAuthorization failed:', err);
+        return c.redirect(
+          `/login?error=${encodeURIComponent('MCP authorization failed. Please try again.')}`,
+          302
+        );
+      }
+    }
+
     const sessionId = await createSession(c.env.DB, {
       userId: user.id,
       ttlSeconds: OKTA_SESSION_TTL,
@@ -329,6 +372,10 @@ authRoutes.post('/logout', async (c) => {
 interface OidcCallbackSuccess {
   claims: Awaited<ReturnType<typeof verifyIdToken>>;
   redirectAfterLogin?: string;
+  /** Echo of the MCP / Claude.ai AuthRequest that beginLogin stashed in
+   *  the OIDC state cookie, if any. When set, the Okta callback dispatches
+   *  to OAUTH_PROVIDER.completeAuthorization instead of issuing a session. */
+  mcpAuthRequest?: string;
 }
 
 /**
@@ -358,7 +405,7 @@ async function runOidcCallback(
   const cookies = parseCookies(c.req.header('Cookie'));
   const stateCookie = cookies[stateCookieName(config.providerId)];
 
-  const { tokens, redirectAfterLogin, clearStateCookie } = await handleCallback({
+  const { tokens, redirectAfterLogin, mcpAuthRequest, clearStateCookie } = await handleCallback({
     config,
     secret: c.env.SESSION_SECRET,
     code,
@@ -375,5 +422,5 @@ async function runOidcCallback(
 
   c.header('Set-Cookie', clearStateCookie, { append: true });
 
-  return { claims, redirectAfterLogin: safeNext(redirectAfterLogin) };
+  return { claims, redirectAfterLogin: safeNext(redirectAfterLogin), mcpAuthRequest };
 }

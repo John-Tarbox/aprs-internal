@@ -13,6 +13,7 @@ import type { AppEnv } from '../env';
 import { LoginPage } from '../pages/LoginPage';
 import { HomePage } from '../pages/HomePage';
 import { GuideKanban101Page } from '../pages/GuideKanban101Page';
+import { GuideMcpPage } from '../pages/GuideMcpPage';
 import { MyCardsPage } from '../pages/MyCardsPage';
 import { CalendarPage } from '../pages/CalendarPage';
 import { DashboardPage } from '../pages/DashboardPage';
@@ -64,6 +65,11 @@ authedPageRoutes.get('/my', async (c) => {
 authedPageRoutes.get('/guide', (c) => {
   const user = c.get('user');
   return c.html(<GuideKanban101Page user={user} />);
+});
+
+authedPageRoutes.get('/guide/mcp', (c) => {
+  const user = c.get('user');
+  return c.html(<GuideMcpPage user={user} />);
 });
 
 authedPageRoutes.get('/dashboard', async (c) => {

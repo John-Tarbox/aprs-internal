@@ -26,6 +26,15 @@ export interface PkceStateCookie {
   s: string;                          // opaque state (anti-CSRF)
   v: string;                          // PKCE code_verifier
   r?: string;                         // post-login redirect path
+  /**
+   * Optional: serialized OAuth AuthRequest from the MCP / Claude.ai
+   * connector flow. When present, the callback finishes by calling
+   * `oauthProvider.completeAuthorization()` and redirecting to the
+   * Claude.ai-supplied redirect_uri instead of the dashboard. Carrying
+   * the AuthRequest here (signed cookie on the user's browser) lets us
+   * round-trip Okta without needing a KV stash.
+   */
+  m?: string;                         // JSON-serialized AuthRequest
 }
 
 const STATE_COOKIE_TTL_SECONDS = 5 * 60;
@@ -60,13 +69,25 @@ export interface BeginLoginResult {
 export async function beginLogin(
   config: OidcProviderConfig,
   secret: string,
-  redirectAfterLogin: string | undefined
+  redirectAfterLogin: string | undefined,
+  /**
+   * Optional MCP-flow payload. When provided, it survives the Okta
+   * round-trip in the signed PKCE state cookie and is read back in the
+   * callback to complete an OAuth authorization for Claude.ai.
+   */
+  mcpAuthRequest?: string | undefined
 ): Promise<BeginLoginResult> {
   const state = randomHex(16);
   const verifier = randomHex(32);
   const challenge = await codeChallenge(verifier);
 
-  const cookiePayload: PkceStateCookie = { p: config.providerId, s: state, v: verifier, r: redirectAfterLogin };
+  const cookiePayload: PkceStateCookie = {
+    p: config.providerId,
+    s: state,
+    v: verifier,
+    r: redirectAfterLogin,
+    m: mcpAuthRequest,
+  };
   const signed = await signJsonValue(cookiePayload, secret);
 
   const params = new URLSearchParams({
@@ -110,6 +131,8 @@ export interface HandleCallbackArgs {
 export interface HandleCallbackResult {
   tokens: TokenResponse;
   redirectAfterLogin?: string;
+  /** Echoes back the MCP AuthRequest passed into beginLogin, if any. */
+  mcpAuthRequest?: string;
   clearStateCookie: string;
 }
 
@@ -148,6 +171,7 @@ export async function handleCallback(args: HandleCallbackArgs): Promise<HandleCa
   return {
     tokens,
     redirectAfterLogin: payload.r,
+    mcpAuthRequest: payload.m,
     clearStateCookie: clearCookieSerialized(stateCookieName(args.config.providerId)),
   };
 }

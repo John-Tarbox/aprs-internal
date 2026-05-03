@@ -1,8 +1,18 @@
+// Re-imported here to avoid a cyclic import in src/mcp/*; the runtime
+// type comes from the @cloudflare/workers-oauth-provider package.
+import type { OAuthHelpers } from '@cloudflare/workers-oauth-provider';
+
 export interface Env {
   DB: D1Database;
   KANBAN_DO: DurableObjectNamespace;
   /** R2 bucket for card attachments (S11). */
   ATTACHMENTS: R2Bucket;
+  /** KV namespace used by @cloudflare/workers-oauth-provider to store
+   *  registered OAuth clients, grants, and access tokens. */
+  OAUTH_KV: KVNamespace;
+  /** Auto-injected by OAuthProvider — used by the OAuth-bridge route
+   *  and Okta callback to parse + complete authorization requests. */
+  OAUTH_PROVIDER: OAuthHelpers;
 
   ENVIRONMENT: 'production' | 'development';
   OKTA_DOMAIN: string;

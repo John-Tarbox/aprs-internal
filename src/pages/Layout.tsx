@@ -62,7 +62,12 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({ title, user, childr
         <footer class="foot">
           <small>
             Internal site · APRS Foundation · do not share externally
-            {user ? <> · <a href="/guide">Kanban 101</a></> : null}
+            {user ? (
+              <>
+                {' '}· <a href="/guide">Kanban 101</a>
+                {' '}· <a href="/guide/mcp">MCP Connector</a>
+              </>
+            ) : null}
           </small>
         </footer>
         {user ? (

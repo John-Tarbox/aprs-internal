@@ -79,6 +79,32 @@ const MAX_NOTES = 10_000;
 const MAX_COMMENT = 5_000;
 const MAX_CHECKLIST_ITEM = 500;
 
+// ── Op-method error hierarchy ───────────────────────────────────────────
+//
+// The DO's write operations are exposed as plain async methods (`op*`)
+// callable both by the WebSocket message handler (this file) and by the
+// MCP server (src/mcp/*) via Durable Object RPC. To keep one source of
+// truth for failure modes, op methods throw these typed errors instead of
+// returning result unions. The WS handler translates them to nack frames
+// (`reason: 'forbidden' | 'not_found' | 'version_conflict' | 'invalid' |
+// 'column_limit'`) at the socket boundary; MCP tools let them propagate
+// and the SDK turns them into JSON-RPC errors for the client.
+export class OpForbiddenError extends Error {
+  constructor(message = 'forbidden') { super(message); this.name = 'OpForbiddenError'; }
+}
+export class OpNotFoundError extends Error {
+  constructor(message = 'not_found') { super(message); this.name = 'OpNotFoundError'; }
+}
+export class OpVersionConflictError extends Error {
+  constructor(public readonly currentVersion: number | null) {
+    super('version_conflict');
+    this.name = 'OpVersionConflictError';
+  }
+}
+export class OpInvalidError extends Error {
+  constructor(message = 'invalid') { super(message); this.name = 'OpInvalidError'; }
+}
+
 // Post-S12, columns are arbitrary per-board strings, validated against
 // kanban_board_columns at the service layer rather than at the wire-
 // format layer. Kept as a permissive shape so a typo or bad-input case
@@ -485,235 +511,92 @@ export class KanbanBoardDO extends DurableObject<Env> {
           return;
         }
         case 'create_card': {
-          // Non-staff users can only attach labels that already exist on
-          // this board — they cannot mint new ones via card edits. Staff
-          // (and admin) can still implicitly create via the same path.
-          const filteredGroups = await this.filterAttachableGroups(
-            attachment.boardId,
-            attachment.isStaff,
-            parsed.groups
-          );
-          const card = await createCard(
-            this.env.DB,
-            attachment.boardId,
-            {
-              column: parsed.column,
-              title: parsed.title,
-              groups: filteredGroups,
-              assigneeUserIds: parsed.assigneeUserIds,
-              assigned: parsed.assigned ?? null,
-              notes: parsed.notes ?? null,
-              startDate: parsed.startDate ?? null,
-              dueDate: parsed.dueDate ?? null,
-              dueTime: parsed.dueTime ?? null,
-              coverColor: parsed.coverColor ? normalizeHexColor(parsed.coverColor) : (parsed.coverColor ?? null),
-            },
-            attachment.userId
-          );
-          this.broadcast({ type: 'card_created', card });
-          await this.emitCardEvent(card.id, attachment.userId, 'card.created', {
-            column: card.column,
-            position: card.position,
-          });
-          // New card → every assignee is "newly assigned" relative to the
-          // (empty) prior state.
-          await this.fanOutAssignmentNotifications(
-            card.id,
-            attachment.userId,
-            [],
-            card.assignees.map((a) => a.userId),
-            card.title
-          );
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          try {
+            await this.opCreateCard(
+              {
+                column: parsed.column,
+                title: parsed.title,
+                groups: parsed.groups,
+                assigneeUserIds: parsed.assigneeUserIds,
+                assigned: parsed.assigned ?? null,
+                notes: parsed.notes ?? null,
+                startDate: parsed.startDate ?? null,
+                dueDate: parsed.dueDate ?? null,
+                dueTime: parsed.dueTime ?? null,
+                coverColor: parsed.coverColor ?? null,
+              },
+              attachment.userId,
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
+          }
           return;
         }
         case 'update_card': {
-          // Capture the prior assignee set before the update so we can
-          // diff and only notify newly-added users (not everyone in the
-          // post-update set, which would re-notify on every edit).
-          let priorAssigneeIds: number[] | null = null;
-          if (parsed.patch.assigneeUserIds !== undefined) {
-            const before = await this.env.DB
-              .prepare(
-                `SELECT user_id FROM kanban_card_assignees WHERE card_id = ?`
-              )
-              .bind(parsed.id)
-              .all<{ user_id: number }>();
-            priorAssigneeIds = (before.results ?? []).map((r) => r.user_id);
-          }
-
-          // Normalize coverColor in the patch before persisting so the
-          // canonical #aabbcc form is what hits the DB regardless of
-          // whether the client sent #abc.
-          let normalizedPatch = parsed.patch.coverColor !== undefined
-            ? {
-                ...parsed.patch,
-                coverColor: parsed.patch.coverColor ? normalizeHexColor(parsed.patch.coverColor) : null,
-              }
-            : parsed.patch;
-          // Same staff-only label-creation gate as create_card — strip
-          // any group names that don't already exist on this board when
-          // the caller isn't staff.
-          if (normalizedPatch.groups !== undefined) {
-            normalizedPatch = {
-              ...normalizedPatch,
-              groups: await this.filterAttachableGroups(
-                attachment.boardId,
-                attachment.isStaff,
-                normalizedPatch.groups
-              ),
-            };
-          }
-          const updated = await updateCard(
-            this.env.DB,
-            parsed.id,
-            parsed.version,
-            normalizedPatch,
-            attachment.userId
-          );
-          if (!updated) {
-            const cur = await this.readVersion(parsed.id);
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: cur === null ? 'not_found' : 'version_conflict',
-              currentVersion: cur ?? undefined,
-            });
-            return;
-          }
-          this.broadcast({ type: 'card_updated', card: updated });
-          // Derive which fields were touched from the patch so the timeline
-          // can show "Updated title, notes" rather than a generic "edited".
-          const changedFields = Object.keys(parsed.patch);
-          if (changedFields.length > 0) {
-            await this.emitCardEvent(updated.id, attachment.userId, 'card.updated', { changedFields });
-          }
-          if (priorAssigneeIds !== null) {
-            await this.fanOutAssignmentNotifications(
-              updated.id,
+          try {
+            await this.opUpdateCard(
+              { id: parsed.id, version: parsed.version, patch: parsed.patch },
               attachment.userId,
-              priorAssigneeIds,
-              updated.assignees.map((a) => a.userId),
-              updated.title
+              attachment.isStaff,
+              attachment.boardId
             );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'move_card': {
-          const result = await moveCard(
-            this.env.DB,
-            parsed.id,
-            parsed.version,
-            parsed.toColumn,
-            parsed.toPosition,
-            attachment.userId
-          );
-          if (!result) {
-            const cur = await this.readVersion(parsed.id);
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: cur === null ? 'not_found' : 'version_conflict',
-              currentVersion: cur ?? undefined,
-            });
-            return;
+          try {
+            await this.opMoveCard(
+              {
+                id: parsed.id,
+                version: parsed.version,
+                toColumn: parsed.toColumn,
+                toPosition: parsed.toPosition,
+              },
+              attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({
-            type: 'card_moved',
-            card: result.card,
-            fromColumn: result.fromColumn,
-            toColumn: result.toColumn,
-            positions: result.affected,
-          });
-          // Only log a move event if the column actually changed — dragging
-          // a card within the same column is usually just reordering and
-          // floods the timeline if logged each time.
-          if (result.fromColumn !== result.toColumn) {
-            await this.emitCardEvent(result.card.id, attachment.userId, 'card.moved', {
-              fromColumn: result.fromColumn,
-              toColumn: result.toColumn,
-              toPosition: result.card.position,
-            });
-          }
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'delete_card': {
-          const ok = await deleteCard(this.env.DB, parsed.id, parsed.version);
-          if (!ok) {
-            const cur = await this.readVersion(parsed.id);
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: cur === null ? 'not_found' : 'version_conflict',
-              currentVersion: cur ?? undefined,
-            });
-            return;
+          try {
+            await this.opDeleteCard({ id: parsed.id, version: parsed.version });
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({ type: 'card_deleted', id: parsed.id });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'archive_card': {
-          const result = await archiveCard(
-            this.env.DB,
-            parsed.id,
-            parsed.version,
-            attachment.userId
-          );
-          if (!result) {
-            const cur = await this.readVersion(parsed.id);
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: cur === null ? 'not_found' : 'version_conflict',
-              currentVersion: cur ?? undefined,
-            });
-            return;
+          try {
+            await this.opArchiveCard(
+              { id: parsed.id, version: parsed.version },
+              attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          // Broadcast: every connected client should remove the card from
-          // the main board view (it's now in the archive drawer) and apply
-          // the post-archive positions of the remaining active cards.
-          this.broadcast({
-            type: 'card_archived',
-            card: result.card,
-            column: result.column,
-            positions: result.affected,
-          });
-          await this.emitCardEvent(result.card.id, attachment.userId, 'card.archived', {
-            column: result.column,
-          });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'unarchive_card': {
-          const result = await unarchiveCard(
-            this.env.DB,
-            parsed.id,
-            parsed.version,
-            attachment.userId
-          );
-          if (!result) {
-            const cur = await this.readVersion(parsed.id);
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: cur === null ? 'not_found' : 'version_conflict',
-              currentVersion: cur ?? undefined,
-            });
-            return;
+          try {
+            await this.opUnarchiveCard(
+              { id: parsed.id, version: parsed.version },
+              attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({
-            type: 'card_unarchived',
-            card: result.card,
-            column: result.column,
-            positions: result.affected,
-          });
-          await this.emitCardEvent(result.card.id, attachment.userId, 'card.unarchived', {
-            column: result.column,
-          });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'list_archived': {
@@ -743,54 +626,27 @@ export class KanbanBoardDO extends DurableObject<Env> {
           return;
         }
         case 'create_comment': {
-          const comment = await createComment(
-            this.env.DB,
-            parsed.cardId,
-            parsed.body,
-            attachment.userId
-          );
-          this.broadcast({ type: 'comment_created', comment });
-          // Mirror to the activity timeline so the same modal section that
-          // already shows other events surfaces "X commented" as well.
-          await this.emitCardEvent(parsed.cardId, attachment.userId, 'card.updated', {
-            changedFields: ['comments'],
-            commentId: comment.id,
-          });
-          // Fan out @mention notifications. We need the card's title for the
-          // notification snippet — single point query keeps the read cheap.
-          const titleRow = await this.env.DB
-            .prepare(`SELECT title FROM kanban_cards WHERE id = ?`)
-            .bind(parsed.cardId)
-            .first<{ title: string }>();
-          await this.fanOutMentionNotifications(
-            parsed.body,
-            attachment.userId,
-            parsed.cardId,
-            comment.id,
-            titleRow?.title ?? null
-          );
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          try {
+            await this.opCreateComment(
+              { cardId: parsed.cardId, body: parsed.body },
+              attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
+          }
           return;
         }
         case 'update_comment': {
-          const updated = await updateComment(
-            this.env.DB,
-            parsed.id,
-            parsed.body,
-            attachment.userId
-          );
-          if (!updated) {
-            // No row matched the (id, author_user_id) predicate — either the
-            // comment doesn't exist or this user isn't the author.
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'not_found',
-            });
-            return;
+          try {
+            await this.opUpdateComment(
+              { id: parsed.id, body: parsed.body },
+              attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({ type: 'comment_updated', comment: updated });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'list_checklist_items': {
@@ -804,140 +660,86 @@ export class KanbanBoardDO extends DurableObject<Env> {
           return;
         }
         case 'create_checklist_item': {
-          const item = await createChecklistItem(
-            this.env.DB,
-            parsed.cardId,
-            parsed.body
-          );
-          this.broadcast({ type: 'checklist_item_created', item });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          try {
+            await this.opCreateChecklistItem({ cardId: parsed.cardId, body: parsed.body });
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
+          }
           return;
         }
         case 'update_checklist_item': {
-          const updated = await updateChecklistItem(this.env.DB, parsed.id, {
-            body: parsed.body,
-            completed: parsed.completed,
-          });
-          if (!updated) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'not_found',
+          try {
+            await this.opUpdateChecklistItem({
+              id: parsed.id,
+              body: parsed.body,
+              completed: parsed.completed,
             });
-            return;
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({ type: 'checklist_item_updated', item: updated });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'delete_checklist_item': {
-          const ref = await deleteChecklistItem(this.env.DB, parsed.id);
-          if (!ref) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'not_found',
-            });
-            return;
+          try {
+            await this.opDeleteChecklistItem({ id: parsed.id });
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          this.broadcast({
-            type: 'checklist_item_deleted',
-            id: ref.id,
-            cardId: ref.cardId,
-          });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'add_column': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
-          }
-          let config;
           try {
-            config = await addBoardColumn(
-              this.env.DB,
-              attachment.boardId,
-              parsed.key,
-              parsed.label
+            await this.opAddColumn(
+              { key: parsed.key, label: parsed.label },
+              attachment.isStaff,
+              attachment.boardId
             );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           } catch (err) {
-            if (err instanceof KanbanColumnLimitError) {
-              this.sendTo(ws, {
-                type: 'nack',
-                clientMsgId: parsed.clientMsgId,
-                reason: 'column_limit',
-                limit: err.limit,
-              });
-              return;
-            }
-            throw err;
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          if (!config) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
-            return;
-          }
-          this.broadcast({ type: 'column_added', column: config });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'rename_column': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opRenameColumn(
+              { column: parsed.column, label: parsed.label },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const config = await renameBoardColumn(
-            this.env.DB,
-            attachment.boardId,
-            parsed.column,
-            parsed.label
-          );
-          if (!config) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
-            return;
-          }
-          this.broadcast({ type: 'column_renamed', column: config });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'delete_column': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opDeleteColumn(
+              { column: parsed.column },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const result = await removeBoardColumn(
-            this.env.DB,
-            attachment.boardId,
-            parsed.column
-          );
-          if (!result.ok) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: result.reason ?? 'invalid',
-            });
-            return;
-          }
-          this.broadcast({ type: 'column_removed', column: parsed.column });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'move_column': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opMoveColumn(
+              { order: parsed.order },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const cols = await reorderBoardColumns(
-            this.env.DB,
-            attachment.boardId,
-            parsed.order
-          );
-          if (!cols) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
-            return;
-          }
-          this.broadcast({ type: 'columns_reordered', columns: cols });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'list_templates': {
@@ -1009,129 +811,70 @@ export class KanbanBoardDO extends DurableObject<Env> {
           return;
         }
         case 'set_column_color': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opSetColumnColor(
+              { column: parsed.column, color: parsed.color },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
-          const config = await setColumnColor(
-            this.env.DB,
-            attachment.boardId,
-            parsed.column,
-            norm
-          );
-          if (!config) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
-            return;
-          }
-          // Reuse the existing column_config_updated event — clients
-          // already re-render headers + colors on receipt.
-          this.broadcast({ type: 'column_config_updated', column: config });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'set_group_color': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opSetGroupColor(
+              { name: parsed.name, color: parsed.color },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
-          const group = await setGroupColor(
-            this.env.DB,
-            attachment.boardId,
-            parsed.name,
-            norm
-          );
-          if (!group) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
-            return;
-          }
-          this.broadcast({ type: 'group_color_updated', group });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'create_group': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opCreateGroup(
+              { name: parsed.name, color: parsed.color },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const norm = parsed.color ? normalizeHexColor(parsed.color) : null;
-          const group = await createGroup(
-            this.env.DB,
-            attachment.boardId,
-            parsed.name,
-            norm ?? null
-          );
-          if (!group) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
-            return;
-          }
-          this.broadcast({ type: 'group_created', group });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'rename_group': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opRenameGroup(
+              { oldName: parsed.oldName, newName: parsed.newName },
+              attachment.userId,
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const result = await renameGroup(
-            this.env.DB,
-            attachment.boardId,
-            parsed.oldName,
-            parsed.newName
-          );
-          if (!result) {
-            // null covers: empty input, no-op (same name), missing source,
-            // or NOCASE collision with a different existing label.
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'invalid' });
-            return;
-          }
-          this.broadcast({
-            type: 'group_renamed',
-            oldName: result.old,
-            group: result.group,
-          });
-          // Per-card audit trail: each card whose label name just
-          // changed gets a card.updated event so the activity timeline
-          // explains where the rename came from. Bounded by N cards
-          // on this board that used the old label.
-          for (const cardId of result.affectedCardIds) {
-            await this.emitCardEvent(cardId, attachment.userId, 'card.updated', {
-              changedFields: ['groups'],
-              labelOp: 'renamed',
-              oldName: result.old,
-              newName: result.group.name,
-            });
-          }
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'delete_group': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'forbidden' });
-            return;
+          try {
+            await this.opDeleteGroup(
+              { name: parsed.name },
+              attachment.userId,
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const result = await deleteGroup(
-            this.env.DB,
-            attachment.boardId,
-            parsed.name
-          );
-          if (!result.ok) {
-            this.sendTo(ws, { type: 'nack', clientMsgId: parsed.clientMsgId, reason: 'not_found' });
-            return;
-          }
-          this.broadcast({ type: 'group_deleted', name: parsed.name });
-          // Audit trail: each card that just lost the label gets a
-          // card.updated event explaining why its groups changed.
-          for (const cardId of result.affectedCardIds) {
-            await this.emitCardEvent(cardId, attachment.userId, 'card.updated', {
-              changedFields: ['groups'],
-              labelOp: 'deleted',
-              labelName: parsed.name,
-            });
-          }
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'list_groups': {
@@ -1157,65 +900,29 @@ export class KanbanBoardDO extends DurableObject<Env> {
           return;
         }
         case 'set_wip_limit': {
-          if (!attachment.isStaff) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'forbidden',
-            });
-            return;
+          try {
+            await this.opSetWipLimit(
+              { column: parsed.column, wipLimit: parsed.wipLimit },
+              attachment.isStaff,
+              attachment.boardId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const config = await setColumnWipLimit(
-            this.env.DB,
-            attachment.boardId,
-            parsed.column,
-            parsed.wipLimit
-          );
-          if (!config) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'not_found',
-            });
-            return;
-          }
-          this.broadcast({ type: 'column_config_updated', column: config });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'delete_comment': {
-          // Look up first so we can broadcast cardId even when the row vanishes
-          // from the predicate-matched DELETE (admin path doesn't read it back).
-          const existing = await getComment(this.env.DB, parsed.id);
-          if (!existing) {
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'not_found',
-            });
-            return;
+          try {
+            await this.opDeleteComment(
+              { id: parsed.id },
+              attachment.userId,
+              attachment.isAdmin
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
           }
-          const ref = await deleteComment(
-            this.env.DB,
-            parsed.id,
-            attachment.userId,
-            attachment.isAdmin
-          );
-          if (!ref) {
-            // Authorization check failed — caller is neither author nor admin.
-            this.sendTo(ws, {
-              type: 'nack',
-              clientMsgId: parsed.clientMsgId,
-              reason: 'forbidden',
-            });
-            return;
-          }
-          this.broadcast({
-            type: 'comment_deleted',
-            id: ref.id,
-            cardId: ref.cardId,
-          });
-          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
       }
@@ -1368,6 +1075,43 @@ export class KanbanBoardDO extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Translate an op-method error into a nack frame on the originating
+   * socket. The case bodies in webSocketMessage call this in their catch
+   * blocks so the WS wire shape is unchanged from before the refactor.
+   */
+  private sendOpError(ws: WebSocket, clientMsgId: string, err: unknown): void {
+    if (err instanceof OpForbiddenError) {
+      this.sendTo(ws, { type: 'nack', clientMsgId, reason: 'forbidden' });
+      return;
+    }
+    if (err instanceof OpNotFoundError) {
+      this.sendTo(ws, { type: 'nack', clientMsgId, reason: 'not_found' });
+      return;
+    }
+    if (err instanceof OpVersionConflictError) {
+      this.sendTo(ws, {
+        type: 'nack',
+        clientMsgId,
+        reason: err.currentVersion === null ? 'not_found' : 'version_conflict',
+        currentVersion: err.currentVersion ?? undefined,
+      });
+      return;
+    }
+    if (err instanceof KanbanColumnLimitError) {
+      this.sendTo(ws, { type: 'nack', clientMsgId, reason: 'column_limit', limit: err.limit });
+      return;
+    }
+    if (err instanceof OpInvalidError) {
+      this.sendTo(ws, { type: 'nack', clientMsgId, reason: err.message || 'invalid' });
+      return;
+    }
+    // Unknown error — log and return a generic db_error nack so the
+    // client surfaces "something went wrong" instead of hanging.
+    console.error('kanban DO op error:', err);
+    this.sendTo(ws, { type: 'nack', clientMsgId, reason: 'db_error' });
+  }
+
   private broadcast(payload: unknown): void {
     const json = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
@@ -1393,5 +1137,457 @@ export class KanbanBoardDO extends DurableObject<Env> {
         // Dead socket
       }
     }
+  }
+
+  // ── Op methods (RPC + WebSocket call into these) ─────────────────────
+  //
+  // Each method below is the single source of truth for one write
+  // operation. The WebSocket message handler in webSocketMessage() calls
+  // these and translates thrown errors into nack frames; the MCP server
+  // (src/mcp/*) calls these directly via Durable Object RPC and lets
+  // errors propagate to the JSON-RPC tool response.
+  //
+  // Side effects (broadcast, audit log, notifications) happen inside
+  // the op method, NOT at the call site, so both callers always trigger
+  // them consistently.
+
+  // ── Card ops ─────────────────────────────────────────────────────────
+
+  async opCreateCard(
+    input: {
+      column: ColumnName;
+      title: string;
+      groups?: string[];
+      assigneeUserIds?: number[];
+      assigned?: string | null;
+      notes?: string | null;
+      startDate?: string | null;
+      dueDate?: string | null;
+      dueTime?: string | null;
+      coverColor?: string | null;
+    },
+    actorUserId: number,
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<CardDto> {
+    const filteredGroups = await this.filterAttachableGroups(
+      boardId,
+      actorIsStaff,
+      input.groups
+    );
+    const card = await createCard(
+      this.env.DB,
+      boardId,
+      {
+        column: input.column,
+        title: input.title,
+        groups: filteredGroups,
+        assigneeUserIds: input.assigneeUserIds,
+        assigned: input.assigned ?? null,
+        notes: input.notes ?? null,
+        startDate: input.startDate ?? null,
+        dueDate: input.dueDate ?? null,
+        dueTime: input.dueTime ?? null,
+        coverColor: input.coverColor
+          ? normalizeHexColor(input.coverColor)
+          : (input.coverColor ?? null),
+      },
+      actorUserId
+    );
+    this.broadcast({ type: 'card_created', card });
+    await this.emitCardEvent(card.id, actorUserId, 'card.created', {
+      column: card.column,
+      position: card.position,
+    });
+    await this.fanOutAssignmentNotifications(
+      card.id,
+      actorUserId,
+      [],
+      card.assignees.map((a) => a.userId),
+      card.title
+    );
+    return card;
+  }
+
+  async opUpdateCard(
+    input: {
+      id: number;
+      version: number;
+      patch: {
+        title?: string;
+        groups?: string[];
+        assigneeUserIds?: number[];
+        assigned?: string | null;
+        notes?: string | null;
+        startDate?: string | null;
+        dueDate?: string | null;
+        dueTime?: string | null;
+        coverColor?: string | null;
+      };
+    },
+    actorUserId: number,
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<CardDto> {
+    let priorAssigneeIds: number[] | null = null;
+    if (input.patch.assigneeUserIds !== undefined) {
+      const before = await this.env.DB
+        .prepare(`SELECT user_id FROM kanban_card_assignees WHERE card_id = ?`)
+        .bind(input.id)
+        .all<{ user_id: number }>();
+      priorAssigneeIds = (before.results ?? []).map((r) => r.user_id);
+    }
+
+    let normalizedPatch = input.patch.coverColor !== undefined
+      ? {
+          ...input.patch,
+          coverColor: input.patch.coverColor ? normalizeHexColor(input.patch.coverColor) : null,
+        }
+      : input.patch;
+    if (normalizedPatch.groups !== undefined) {
+      normalizedPatch = {
+        ...normalizedPatch,
+        groups: await this.filterAttachableGroups(
+          boardId,
+          actorIsStaff,
+          normalizedPatch.groups
+        ),
+      };
+    }
+    const updated = await updateCard(
+      this.env.DB,
+      input.id,
+      input.version,
+      normalizedPatch,
+      actorUserId
+    );
+    if (!updated) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    this.broadcast({ type: 'card_updated', card: updated });
+    const changedFields = Object.keys(input.patch);
+    if (changedFields.length > 0) {
+      await this.emitCardEvent(updated.id, actorUserId, 'card.updated', { changedFields });
+    }
+    if (priorAssigneeIds !== null) {
+      await this.fanOutAssignmentNotifications(
+        updated.id,
+        actorUserId,
+        priorAssigneeIds,
+        updated.assignees.map((a) => a.userId),
+        updated.title
+      );
+    }
+    return updated;
+  }
+
+  async opMoveCard(
+    input: { id: number; version: number; toColumn: ColumnName; toPosition: number },
+    actorUserId: number
+  ): Promise<{ card: CardDto; fromColumn: ColumnName; toColumn: ColumnName; affected: Array<{ id: number; position: number }> }> {
+    const result = await moveCard(
+      this.env.DB,
+      input.id,
+      input.version,
+      input.toColumn,
+      input.toPosition,
+      actorUserId
+    );
+    if (!result) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    this.broadcast({
+      type: 'card_moved',
+      card: result.card,
+      fromColumn: result.fromColumn,
+      toColumn: result.toColumn,
+      positions: result.affected,
+    });
+    if (result.fromColumn !== result.toColumn) {
+      await this.emitCardEvent(result.card.id, actorUserId, 'card.moved', {
+        fromColumn: result.fromColumn,
+        toColumn: result.toColumn,
+        toPosition: result.card.position,
+      });
+    }
+    return result;
+  }
+
+  async opDeleteCard(
+    input: { id: number; version: number }
+  ): Promise<void> {
+    const ok = await deleteCard(this.env.DB, input.id, input.version);
+    if (!ok) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    this.broadcast({ type: 'card_deleted', id: input.id });
+  }
+
+  async opArchiveCard(
+    input: { id: number; version: number },
+    actorUserId: number
+  ): Promise<{ card: CardDto; column: ColumnName; affected: Array<{ id: number; position: number }> }> {
+    const result = await archiveCard(this.env.DB, input.id, input.version, actorUserId);
+    if (!result) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    this.broadcast({
+      type: 'card_archived',
+      card: result.card,
+      column: result.column,
+      positions: result.affected,
+    });
+    await this.emitCardEvent(result.card.id, actorUserId, 'card.archived', {
+      column: result.column,
+    });
+    return result;
+  }
+
+  async opUnarchiveCard(
+    input: { id: number; version: number },
+    actorUserId: number
+  ): Promise<{ card: CardDto; column: ColumnName; affected: Array<{ id: number; position: number }> }> {
+    const result = await unarchiveCard(this.env.DB, input.id, input.version, actorUserId);
+    if (!result) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    this.broadcast({
+      type: 'card_unarchived',
+      card: result.card,
+      column: result.column,
+      positions: result.affected,
+    });
+    await this.emitCardEvent(result.card.id, actorUserId, 'card.unarchived', {
+      column: result.column,
+    });
+    return result;
+  }
+
+  // ── Comment ops ──────────────────────────────────────────────────────
+
+  async opCreateComment(
+    input: { cardId: number; body: string },
+    actorUserId: number
+  ): Promise<Awaited<ReturnType<typeof createComment>>> {
+    const comment = await createComment(this.env.DB, input.cardId, input.body, actorUserId);
+    this.broadcast({ type: 'comment_created', comment });
+    await this.emitCardEvent(input.cardId, actorUserId, 'card.updated', {
+      changedFields: ['comments'],
+      commentId: comment.id,
+    });
+    const titleRow = await this.env.DB
+      .prepare(`SELECT title FROM kanban_cards WHERE id = ?`)
+      .bind(input.cardId)
+      .first<{ title: string }>();
+    await this.fanOutMentionNotifications(
+      input.body,
+      actorUserId,
+      input.cardId,
+      comment.id,
+      titleRow?.title ?? null
+    );
+    return comment;
+  }
+
+  async opUpdateComment(
+    input: { id: number; body: string },
+    actorUserId: number
+  ): Promise<Awaited<ReturnType<typeof updateComment>>> {
+    const updated = await updateComment(this.env.DB, input.id, input.body, actorUserId);
+    if (!updated) throw new OpNotFoundError();
+    this.broadcast({ type: 'comment_updated', comment: updated });
+    return updated;
+  }
+
+  async opDeleteComment(
+    input: { id: number },
+    actorUserId: number,
+    actorIsAdmin: boolean
+  ): Promise<{ id: number; cardId: number }> {
+    const existing = await getComment(this.env.DB, input.id);
+    if (!existing) throw new OpNotFoundError();
+    const ref = await deleteComment(this.env.DB, input.id, actorUserId, actorIsAdmin);
+    if (!ref) throw new OpForbiddenError();
+    this.broadcast({ type: 'comment_deleted', id: ref.id, cardId: ref.cardId });
+    return ref;
+  }
+
+  // ── Checklist ops ────────────────────────────────────────────────────
+
+  async opCreateChecklistItem(
+    input: { cardId: number; body: string }
+  ): Promise<Awaited<ReturnType<typeof createChecklistItem>>> {
+    const item = await createChecklistItem(this.env.DB, input.cardId, input.body);
+    this.broadcast({ type: 'checklist_item_created', item });
+    return item;
+  }
+
+  async opUpdateChecklistItem(
+    input: { id: number; body?: string; completed?: boolean }
+  ): Promise<NonNullable<Awaited<ReturnType<typeof updateChecklistItem>>>> {
+    const updated = await updateChecklistItem(this.env.DB, input.id, {
+      body: input.body,
+      completed: input.completed,
+    });
+    if (!updated) throw new OpNotFoundError();
+    this.broadcast({ type: 'checklist_item_updated', item: updated });
+    return updated;
+  }
+
+  async opDeleteChecklistItem(
+    input: { id: number }
+  ): Promise<{ id: number; cardId: number }> {
+    const ref = await deleteChecklistItem(this.env.DB, input.id);
+    if (!ref) throw new OpNotFoundError();
+    this.broadcast({ type: 'checklist_item_deleted', id: ref.id, cardId: ref.cardId });
+    return ref;
+  }
+
+  // ── Column ops (staff-only) ──────────────────────────────────────────
+
+  async opAddColumn(
+    input: { key: string; label: string },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof addBoardColumn>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    // addBoardColumn throws KanbanColumnLimitError on cap; let it propagate.
+    const config = await addBoardColumn(this.env.DB, boardId, input.key, input.label);
+    if (!config) throw new OpInvalidError();
+    this.broadcast({ type: 'column_added', column: config });
+    return config;
+  }
+
+  async opRenameColumn(
+    input: { column: ColumnName; label: string },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof renameBoardColumn>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const config = await renameBoardColumn(this.env.DB, boardId, input.column, input.label);
+    if (!config) throw new OpNotFoundError();
+    this.broadcast({ type: 'column_renamed', column: config });
+    return config;
+  }
+
+  async opDeleteColumn(
+    input: { column: ColumnName },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<void> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const result = await removeBoardColumn(this.env.DB, boardId, input.column);
+    if (!result.ok) throw new OpInvalidError(result.reason ?? 'invalid');
+    this.broadcast({ type: 'column_removed', column: input.column });
+  }
+
+  async opMoveColumn(
+    input: { order: ColumnName[] },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof reorderBoardColumns>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const cols = await reorderBoardColumns(this.env.DB, boardId, input.order);
+    if (!cols) throw new OpInvalidError();
+    this.broadcast({ type: 'columns_reordered', columns: cols });
+    return cols;
+  }
+
+  async opSetColumnColor(
+    input: { column: ColumnName; color: string | null | undefined },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof setColumnColor>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const norm = input.color ? normalizeHexColor(input.color) : null;
+    const config = await setColumnColor(this.env.DB, boardId, input.column, norm);
+    if (!config) throw new OpNotFoundError();
+    this.broadcast({ type: 'column_config_updated', column: config });
+    return config;
+  }
+
+  async opSetWipLimit(
+    input: { column: ColumnName; wipLimit: number | null },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof setColumnWipLimit>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const config = await setColumnWipLimit(this.env.DB, boardId, input.column, input.wipLimit);
+    if (!config) throw new OpNotFoundError();
+    this.broadcast({ type: 'column_config_updated', column: config });
+    return config;
+  }
+
+  // ── Label / group ops (staff-only) ───────────────────────────────────
+
+  async opCreateGroup(
+    input: { name: string; color?: string | null | undefined },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof createGroup>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const norm = input.color ? normalizeHexColor(input.color) : null;
+    const group = await createGroup(this.env.DB, boardId, input.name, norm ?? null);
+    if (!group) throw new OpInvalidError();
+    this.broadcast({ type: 'group_created', group });
+    return group;
+  }
+
+  async opRenameGroup(
+    input: { oldName: string; newName: string },
+    actorUserId: number,
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof renameGroup>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const result = await renameGroup(this.env.DB, boardId, input.oldName, input.newName);
+    if (!result) throw new OpInvalidError();
+    this.broadcast({
+      type: 'group_renamed',
+      oldName: result.old,
+      group: result.group,
+    });
+    for (const cardId of result.affectedCardIds) {
+      await this.emitCardEvent(cardId, actorUserId, 'card.updated', {
+        changedFields: ['groups'],
+        labelOp: 'renamed',
+        oldName: result.old,
+        newName: result.group.name,
+      });
+    }
+    return result;
+  }
+
+  async opDeleteGroup(
+    input: { name: string },
+    actorUserId: number,
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<{ ok: true; affectedCardIds: number[] }> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const result = await deleteGroup(this.env.DB, boardId, input.name);
+    if (!result.ok) throw new OpNotFoundError();
+    this.broadcast({ type: 'group_deleted', name: input.name });
+    for (const cardId of result.affectedCardIds) {
+      await this.emitCardEvent(cardId, actorUserId, 'card.updated', {
+        changedFields: ['groups'],
+        labelOp: 'deleted',
+        labelName: input.name,
+      });
+    }
+    return { ok: true, affectedCardIds: result.affectedCardIds };
+  }
+
+  async opSetGroupColor(
+    input: { name: string; color: string | null | undefined },
+    actorIsStaff: boolean,
+    boardId: number
+  ): Promise<NonNullable<Awaited<ReturnType<typeof setGroupColor>>>> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    const norm = input.color ? normalizeHexColor(input.color) : null;
+    const group = await setGroupColor(this.env.DB, boardId, input.name, norm);
+    if (!group) throw new OpInvalidError();
+    this.broadcast({ type: 'group_color_updated', group });
+    return group;
   }
 }

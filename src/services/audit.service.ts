@@ -10,6 +10,7 @@ export type AuditAction =
   | 'login.okta'
   | 'login.okta.denied'
   | 'login.okta.failed'
+  | 'login.okta.mcp'
   | 'login.google'
   | 'login.google.denied'
   | 'login.google.failed'
