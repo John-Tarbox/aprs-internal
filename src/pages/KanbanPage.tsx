@@ -359,8 +359,18 @@ export const KanbanPage: FC<KanbanPageProps> = ({
 
 const kanbanCss = `
   /* Break out of Layout's .main max-width so the horizontal column track
-     can use the full viewport before the internal scrollbar engages. */
-  body:has(.kanban-board) .main { max-width: none; padding: 0 16px; }
+     can use the full viewport before the internal scrollbar engages.
+     overflow-x: hidden on body + min-width: 0 on the board (below) prevents
+     the flex container — which has nowrap + flex-shrink:0 children — from
+     growing past viewport and pushing a page-level horizontal scrollbar
+     instead of the in-board one. */
+  body:has(.kanban-board) { overflow-x: hidden; }
+  body:has(.kanban-board) .main {
+    max-width: none;
+    padding: 0 16px;
+    width: 100%;
+    box-sizing: border-box;
+  }
 
   .kanban-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .kanban-head h1 { margin: 0; }
@@ -480,6 +490,16 @@ const kanbanCss = `
     margin-top: 24px;
     overflow-x: auto;
     overflow-y: visible;
+    /* Without min-width:0 a flex container with nowrap + non-shrinking
+       children claims its full content size as its intrinsic width,
+       defeating overflow-x: auto. min-width:0 says "you may be smaller
+       than your content" — which is what we need for the horizontal
+       scrollbar to live inside the board rather than on the page. */
+    min-width: 0;
+    /* Always reserve space for the scrollbar so columns don't reflow
+       when it appears/disappears, and so the bar is visible (not just
+       overlay-on-hover) on macOS / iOS. */
+    scrollbar-gutter: stable;
     padding-bottom: 8px;
     scroll-snap-type: x proximity;
   }
