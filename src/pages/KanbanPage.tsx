@@ -174,6 +174,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
 
       <div id="kanban-modal" class="kanban-modal" hidden>
         <div class="kanban-modal-inner">
+          <button type="button" id="kf-x-close" class="kf-x-close" aria-label="Close">×</button>
           <h2 id="kanban-modal-title">New card</h2>
           <form id="kanban-form">
             <label>Task Name
@@ -183,7 +184,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
               <span class="kf-groups-label">Labels</span>
               <div id="kf-groups-chips" class="kf-groups-chips" aria-live="polite"></div>
               <div class="kf-groups-entry">
-                <button type="button" id="kf-groups-pick" class="btn" aria-haspopup="listbox" aria-expanded="false">+ Add label</button>
+                <button type="button" id="kf-groups-pick" class="btn btn-xs" aria-haspopup="listbox" aria-expanded="false">+ Label</button>
                 <div id="kf-groups-popover" class="kf-groups-popover" hidden role="listbox" aria-label="Existing labels">
                   <div id="kf-groups-popover-list" class="kf-groups-popover-list"></div>
                   <div id="kf-groups-popover-empty" class="kf-groups-popover-empty" hidden>No labels on this board yet.</div>
@@ -206,23 +207,26 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                        placeholder="Type a name or email and press Enter"
                        aria-label="Add an assignee" />
                 <datalist id="kf-assignees-suggest"></datalist>
-                <button type="button" id="kf-assignees-add" class="btn">Add</button>
+                <button type="button" id="kf-assignees-add" class="btn btn-xs">Add</button>
               </div>
             </div>
-            <label>Assigned (legacy text — for non-users)
-              <input type="text" id="kf-assigned" maxlength={100} />
-            </label>
-            <label>Start Date
-              <input type="date" id="kf-start" />
-            </label>
-            <div class="kf-due-row">
-              <label class="kf-due-date">Due Date
+            {/* Legacy free-text "Assigned" input removed 2026-05; users
+                put any non-user assignment info in Notes instead. The
+                CardDto field is preserved server-side so existing data
+                doesn't disappear. */}
+            <div class="kf-dates-row" id="kf-dates-row" hidden>
+              <label class="kf-dates-cell">Start
+                <input type="date" id="kf-start" />
+              </label>
+              <label class="kf-dates-cell">Due
                 <input type="date" id="kf-due" />
               </label>
-              <label class="kf-due-time">Due Time
+              <label class="kf-dates-cell">Time
                 <input type="time" id="kf-due-time" />
               </label>
+              <button type="button" id="kf-dates-clear" class="btn btn-xs kf-dates-clear" title="Clear all dates">×</button>
             </div>
+            <button type="button" id="kf-dates-add" class="btn btn-xs kf-add-affordance">+ Add date</button>
             <div class="kf-cover-row">
               <span class="kf-cover-label-text">Cover color</span>
               <button type="button" id="kf-cover-swatch" class="ws-trigger" aria-label="Pick a cover color">
@@ -230,7 +234,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                 <span class="ws-trigger-arrow">▾</span>
               </button>
               <span id="kf-cover-name" class="kf-cover-name muted">No cover</span>
-              <button type="button" id="kf-cover-clear" class="btn kf-cover-clear">Clear</button>
+              <button type="button" id="kf-cover-clear" class="btn btn-xs kf-cover-clear">Clear</button>
             </div>
             <label>Notes
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
@@ -270,6 +274,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                 <span id="kf-attachment-status" class="kf-attachment-status muted"></span>
               </div>
             </section>
+            <button type="button" id="kf-attachments-add-btn" class="btn btn-xs kf-add-affordance" hidden>+ Add attachment</button>
             <section id="kf-checklist" class="kf-checklist" hidden aria-label="Checklist">
               <h3 class="kf-checklist-title">Checklist <span id="kf-checklist-progress" class="kf-checklist-progress"></span></h3>
               <ol id="kf-checklist-list" class="kf-checklist-list"></ol>
@@ -279,6 +284,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                 <button type="button" id="kf-checklist-add-btn" class="btn">Add</button>
               </div>
             </section>
+            <button type="button" id="kf-checklist-add-affordance" class="btn btn-xs kf-add-affordance" hidden>+ Add checklist</button>
             <section id="kf-comments" class="kf-comments" hidden aria-label="Comments">
               <h3 class="kf-comments-title">Comments</h3>
               <ol id="kf-comments-list" class="kf-comments-list"></ol>
@@ -292,10 +298,16 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                 </div>
               </div>
             </section>
+            <button type="button" id="kf-comments-add-affordance" class="btn btn-xs kf-add-affordance" hidden>+ Add comment</button>
             <section id="kf-activity" class="kf-activity" hidden aria-label="Activity timeline">
-              <h3 class="kf-activity-title">Activity</h3>
-              <ol id="kf-activity-list" class="kf-activity-list"></ol>
-              <p id="kf-activity-empty" class="kf-activity-empty" hidden>No activity yet.</p>
+              <button type="button" id="kf-activity-toggle" class="kf-activity-toggle" aria-expanded="false">
+                <span class="kf-activity-caret" id="kf-activity-caret">▸</span>
+                <span class="kf-activity-title">Activity</span>
+              </button>
+              <div id="kf-activity-body" class="kf-activity-body" hidden>
+                <ol id="kf-activity-list" class="kf-activity-list"></ol>
+                <p id="kf-activity-empty" class="kf-activity-empty" hidden>No activity yet.</p>
+              </div>
             </section>
             <p id="kf-error" class="kanban-error" hidden></p>
             <div class="kanban-modal-actions">
@@ -517,20 +529,23 @@ const kanbanCss = `
     display: flex;
     flex-wrap: nowrap;
     gap: 12px;
-    margin-top: 24px;
-    overflow-x: auto;
-    overflow-y: visible;
-    /* Without min-width:0 a flex container with nowrap + non-shrinking
-       children claims its full content size as its intrinsic width,
-       defeating overflow-x: auto. min-width:0 says "you may be smaller
-       than your content" — which is what we need for the horizontal
-       scrollbar to live inside the board rather than on the page. */
+    margin-top: 16px;
+    /* Constrain the board to whatever vertical space is left below the
+       page chrome (header, filter row, status). Columns scroll
+       internally past that. The calc subtracts an approximation of the
+       chrome above; tune if the header grows. */
+    height: calc(100vh - 220px);
+    min-height: 320px;
+    overflow-x: scroll;
+    overflow-y: hidden;
+    /* See min-width:0 note below — needed so the flex container can
+       shrink below its content's natural width. */
     min-width: 0;
-    /* Always reserve space for the scrollbar so columns don't reflow
-       when it appears/disappears, and so the bar is visible (not just
-       overlay-on-hover) on macOS / iOS. */
+    /* Always reserve space for the scrollbar so the horizontal bar
+       stays visible at the bottom of the board (not overlay-on-hover
+       on macOS / iOS), even when columns fit. */
     scrollbar-gutter: stable;
-    padding-bottom: 8px;
+    padding-bottom: 4px;
     scroll-snap-type: x proximity;
   }
   .kanban-col {
@@ -538,11 +553,13 @@ const kanbanCss = `
     border: 1px solid rgba(128,128,128,0.2);
     border-radius: 8px;
     padding: 8px;
-    min-height: 200px;
+    /* Each column claims the full board height; its body scrolls. */
+    height: 100%;
     display: flex;
     flex-direction: column;
     flex: 0 0 280px;
     scroll-snap-align: start;
+    min-height: 0;
   }
   .kanban-col-add { flex: 0 0 200px; }
   .kanban-col-head {
@@ -589,7 +606,14 @@ const kanbanCss = `
     border-radius: 4px; width: 24px; height: 24px; cursor: pointer; color: inherit; font: inherit;
   }
   .kanban-add:hover { background: rgba(128,128,128,0.15); }
-  .kanban-col-body { flex: 1; min-height: 40px; }
+  .kanban-col-body {
+    flex: 1; min-height: 40px;
+    /* Each column scrolls its own card list internally — keeps the
+       outer board to a single horizontal scrollbar and bounds page
+       height to the viewport. */
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
 
   /* Card background must be opaque in both themes so the column's
    * accent tint (added 2026-05) sits BEHIND cards rather than bleeding
@@ -693,6 +717,16 @@ const kanbanCss = `
   }
   .kf-children-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .kf-children-add input { flex: 1; min-width: 200px; }
+
+  /* Comments-present indicator on the tile (added 2026-05). */
+  .kanban-card-commentcount {
+    margin-top: 4px; font-size: 0.78em; opacity: 0.65;
+    display: inline-block;
+  }
+  .kanban-card-commentcount-unread {
+    opacity: 1; font-weight: 600;
+    color: rgba(37, 99, 235, 0.95);
+  }
 
   /* Tile badges for parent breadcrumb + child progress (added 2026-05). */
   .kanban-card-parentlink {
@@ -822,9 +856,18 @@ const kanbanCss = `
   .kf-comment-composer-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
   /* Activity timeline in the card modal. */
-  .kf-activity { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-activity { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 8px; }
   .kf-activity[hidden] { display: none; }
-  .kf-activity-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  /* Collapsible header (added 2026-05) — caret + title share a button. */
+  .kf-activity-toggle {
+    display: flex; align-items: center; gap: 6px;
+    background: transparent; border: none; cursor: pointer;
+    color: inherit; font: inherit; padding: 4px 0;
+    width: 100%; text-align: left;
+  }
+  .kf-activity-caret { display: inline-block; width: 12px; opacity: 0.7; }
+  .kf-activity-body[hidden] { display: none; }
+  .kf-activity-title { margin: 0; font-size: 0.95em; font-weight: 600; }
   .kf-activity-list {
     list-style: none; margin: 0; padding: 0;
     display: flex; flex-direction: column; gap: 6px;
@@ -847,16 +890,46 @@ const kanbanCss = `
   }
   .kanban-modal[hidden] { display: none; }
   .kanban-modal-inner {
-    background: #fff; color: #111; border-radius: 8px; padding: 20px;
+    background: #fff; color: #111; border-radius: 8px; padding: 16px 20px;
     width: 100%; max-width: 500px; max-height: 90vh; overflow-y: auto;
+    position: relative;
   }
   @media (prefers-color-scheme: dark) {
     .kanban-modal-inner { background: #1a1a1a; color: #eee; }
   }
-  .kanban-modal-inner h2 { margin-top: 0; }
+  .kanban-modal-inner h2 { margin-top: 0; margin-right: 32px; font-size: 1.15em; }
   .kanban-modal-inner input, .kanban-modal-inner textarea {
     width: 100%; box-sizing: border-box; margin-top: 4px;
   }
+  /* Top-right X close button (added 2026-05). */
+  .kf-x-close {
+    position: absolute; top: 8px; right: 10px;
+    background: transparent; border: none; cursor: pointer;
+    color: inherit; opacity: 0.55; font-size: 1.4em; line-height: 1;
+    padding: 4px 8px; border-radius: 4px;
+  }
+  .kf-x-close:hover { opacity: 1; background: rgba(128,128,128,0.15); }
+  /* Compact button variant — smaller padding/font for affordance rows. */
+  .btn-xs {
+    font-size: 0.82em; padding: 3px 8px;
+  }
+  /* Dates row: 3 columns on one line. The clear "×" sits at the end. */
+  .kf-dates-row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 6px;
+    align-items: end; margin: 8px 0;
+  }
+  .kf-dates-row[hidden] { display: none; }
+  .kf-dates-cell { font-size: 0.85em; display: flex; flex-direction: column; }
+  .kf-dates-cell input { margin-top: 2px; }
+  .kf-dates-clear { align-self: end; height: 30px; padding: 0 8px; }
+  /* "+ Add X" affordances — visible when their section is hidden.
+     Render inline-block so multiple stack vertically with breathing room. */
+  .kf-add-affordance {
+    display: inline-block; margin: 4px 6px 4px 0; font-size: 0.8em;
+    opacity: 0.85; padding: 3px 10px;
+  }
+  .kf-add-affordance:hover { opacity: 1; }
+  .kf-add-affordance[hidden] { display: none; }
   .kanban-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   .kanban-btn-danger { color: #b91c1c; border-color: rgba(185,28,28,0.5); margin-right: auto; }
   .kanban-error { color: #b91c1c; font-size: 0.9em; margin: 8px 0 0; }
@@ -1174,7 +1247,10 @@ const kanbanClientJs = `
   var groupsPopoverNewName = document.getElementById('kf-groups-popover-name');
   var groupsPopoverCreate = document.getElementById('kf-groups-popover-create');
   var groupsPopoverCancel = document.getElementById('kf-groups-popover-cancel');
-  var assignedInput = document.getElementById('kf-assigned');
+  // Legacy "assigned" free-text input removed from the modal 2026-05.
+  // Keep legacyAssignedState as a passthrough so existing rows with
+  // a non-null assigned field don't get nulled out on every save.
+  var legacyAssignedState = null;
   var startInput = document.getElementById('kf-start');
   var dueInput = document.getElementById('kf-due');
   var dueTimeInput = document.getElementById('kf-due-time');
@@ -1209,9 +1285,20 @@ const kanbanClientJs = `
   coverClearBtn.addEventListener('click', function() { setCoverColorState(null); });
   var errorEl = document.getElementById('kf-error');
   var cancelBtn = document.getElementById('kf-cancel');
+  var xCloseBtn = document.getElementById('kf-x-close');
   var archiveBtn = document.getElementById('kf-archive');
   var restoreBtn = document.getElementById('kf-restore');
   var saveBtn = document.getElementById('kf-save');
+  // Hide-until-add affordances (added 2026-05).
+  var datesRowEl = document.getElementById('kf-dates-row');
+  var datesAddBtn = document.getElementById('kf-dates-add');
+  var datesClearBtn = document.getElementById('kf-dates-clear');
+  var attachmentsAddAffordance = document.getElementById('kf-attachments-add-btn');
+  var checklistAddAffordance = document.getElementById('kf-checklist-add-affordance');
+  var commentsAddAffordance = document.getElementById('kf-comments-add-affordance');
+  var activityToggleBtn = document.getElementById('kf-activity-toggle');
+  var activityCaretEl = document.getElementById('kf-activity-caret');
+  var activityBodyEl = document.getElementById('kf-activity-body');
   var toastEl = document.getElementById('kanban-toast');
   var toastTimer = null;
   var archiveToggleBtn = document.getElementById('kanban-archive-toggle');
@@ -3083,7 +3170,9 @@ const kanbanClientJs = `
         meta.appendChild(ch);
       });
     }
-    if (card.assigned) meta.appendChild(chip('@ ' + card.assigned));
+    // Legacy free-text "assigned" chip removed 2026-05 — the field is
+    // no longer surfaced in the UI; old values still flow through the
+    // DTO but aren't rendered.
     if (card.startDate) meta.appendChild(chip('Start ' + card.startDate));
     if (card.dueDate) {
       var dueLabel = 'Due ' + card.dueDate;
@@ -3125,7 +3214,23 @@ const kanbanClientJs = `
       el.appendChild(badge);
     }
 
-    // Unread-comments indicator: shown when the server marked this card
+    // Comments-present indicator (added 2026-05). Shows when the card
+    // has any comments at all; bolder styling when there are unread
+    // comments for the current viewer. Appended directly to the tile
+    // (not to meta, which has already been mounted above).
+    var cTotal = typeof card.commentCount === 'number' ? card.commentCount : 0;
+    if (cTotal > 0) {
+      var commentBadge = document.createElement('div');
+      commentBadge.className = 'kanban-card-commentcount';
+      if (card.hasUnreadComments) commentBadge.classList.add('kanban-card-commentcount-unread');
+      commentBadge.title = card.hasUnreadComments
+        ? 'Has unread comments (' + cTotal + ' total)'
+        : cTotal + ' comment' + (cTotal === 1 ? '' : 's');
+      commentBadge.textContent = '💬 ' + cTotal;
+      el.appendChild(commentBadge);
+    }
+
+    // Unread-comments dot indicator (separate icon, kept for back-compat): shown when the server marked this card
     // as having comments authored by another user that the viewer hasn't
     // seen since their last view. Built via createElementNS rather than
     // innerHTML to keep this otherwise inline-JS file XSS-safe by audit.
@@ -3179,15 +3284,18 @@ const kanbanClientJs = `
 
   function renderAttachments() {
     while (attachmentsListEl.firstChild) attachmentsListEl.removeChild(attachmentsListEl.firstChild);
+    // Hide-until-present pattern: collapse the section to a small
+    // "+ Add attachment" affordance when there are none, expand to the
+    // full section + upload control when there's at least one.
     if (attachmentList.length === 0) {
-      var empty = document.createElement('li');
-      empty.className = 'muted';
-      empty.style.fontStyle = 'italic';
-      empty.style.fontSize = '0.85em';
-      empty.textContent = 'No attachments yet.';
-      attachmentsListEl.appendChild(empty);
+      attachmentsSectionEl.hidden = true;
+      if (editingCardId !== null && !editingArchived) {
+        attachmentsAddAffordance.hidden = false;
+      }
       return;
     }
+    attachmentsSectionEl.hidden = false;
+    attachmentsAddAffordance.hidden = true;
     attachmentList.forEach(function(a) {
       var li = document.createElement('li');
       li.className = 'kf-attachment-item';
@@ -3282,15 +3390,23 @@ const kanbanClientJs = `
 
   function renderChecklist() {
     while (checklistListEl.firstChild) checklistListEl.removeChild(checklistListEl.firstChild);
+    // Same hide-until-present pattern as attachments.
+    if (checklistItems.length === 0) {
+      checklistSectionEl.hidden = true;
+      if (editingCardId !== null && !editingArchived) {
+        checklistAddAffordance.hidden = false;
+      }
+      return;
+    }
+    checklistSectionEl.hidden = false;
+    checklistAddAffordance.hidden = true;
     var done = 0;
     for (var i = 0; i < checklistItems.length; i++) {
       var item = checklistItems[i];
       if (item.completedAt) done++;
       checklistListEl.appendChild(renderChecklistItemNode(item));
     }
-    checklistProgressEl.textContent = checklistItems.length === 0
-      ? ''
-      : '(' + done + ' / ' + checklistItems.length + ')';
+    checklistProgressEl.textContent = '(' + done + ' / ' + checklistItems.length + ')';
   }
 
   function renderChecklistItemNode(item) {
@@ -3507,10 +3623,17 @@ const kanbanClientJs = `
 
   function renderCommentsList() {
     while (commentsListEl.firstChild) commentsListEl.removeChild(commentsListEl.firstChild);
+    // Same hide-until-present pattern as attachments / checklist.
     if (commentList.length === 0) {
+      commentsSectionEl.hidden = true;
+      if (editingCardId !== null && !editingArchived) {
+        commentsAddAffordance.hidden = false;
+      }
       commentsEmptyEl.hidden = false;
       return;
     }
+    commentsSectionEl.hidden = false;
+    commentsAddAffordance.hidden = true;
     commentsEmptyEl.hidden = true;
     for (var i = 0; i < commentList.length; i++) {
       commentsListEl.appendChild(renderCommentNode(commentList[i]));
@@ -3835,7 +3958,7 @@ const kanbanClientJs = `
     selectedAssignees = [];
     renderSelectedAssignees();
     assigneesInputEl.value = '';
-    assignedInput.value = '';
+    legacyAssignedState = null;
     startInput.value = '';
     dueInput.value = '';
     dueTimeInput.value = '';
@@ -3845,23 +3968,32 @@ const kanbanClientJs = `
     archiveBtn.hidden = true;
     restoreBtn.hidden = true;
     saveTemplateBtn.hidden = true;
-    // No card id yet → no activity timeline or comments to show.
+    // No card id yet → nothing to show on any optional section. Keep
+    // them hidden and surface the small "+ Add X" affordances. Activity
+    // doesn't apply to a brand-new card (no events yet).
     activitySectionEl.hidden = true;
     activityEvents = [];
+    setActivityCollapsed(true);
     commentsSectionEl.hidden = true;
+    commentsAddAffordance.hidden = true; // can't add comments before save
     commentList = [];
     commentsByCardId = 0;
     commentInputEl.value = '';
     commentPostBtn.disabled = false;
     checklistSectionEl.hidden = true;
+    checklistAddAffordance.hidden = true; // can't add until card exists
     checklistItems = [];
     checklistByCardId = 0;
     checklistInputEl.value = '';
     attachmentsSectionEl.hidden = true;
+    attachmentsAddAffordance.hidden = true; // can't upload before save
     attachmentList = [];
     attachmentsByCardId = 0;
     attachmentInputEl.value = '';
     attachmentStatusEl.textContent = '';
+    // Dates start hidden behind the "+ Add date" affordance for new cards.
+    datesRowEl.hidden = true;
+    datesAddBtn.hidden = false;
     // Parent/Children: new card has no parent and no children yet.
     parentCardIdState = null;
     renderParentDisplay();
@@ -3893,7 +4025,9 @@ const kanbanClientJs = `
     selectedAssignees = Array.isArray(card.assignees) ? card.assignees.slice() : [];
     renderSelectedAssignees();
     assigneesInputEl.value = '';
-    assignedInput.value = card.assigned || '';
+    // Preserve any legacy assigned value the server has — we no longer
+    // surface it in the UI but must not blow it away on save.
+    legacyAssignedState = card.assigned || null;
     startInput.value = card.startDate || '';
     dueInput.value = card.dueDate || '';
     dueTimeInput.value = card.dueTime || '';
@@ -3906,19 +4040,36 @@ const kanbanClientJs = `
     restoreBtn.hidden = !editingArchived;
     // Templates can be saved from any active card (not from archived).
     saveTemplateBtn.hidden = editingArchived;
-    // Reveal attachments + checklist + comments + activity timeline and
-    // kick off fetches for this card. All four render empty while in
-    // flight.
-    attachmentsSectionEl.hidden = false;
+    // Dates: show the row up-front if any date is already set on the
+    // card; otherwise surface the "+ Add date" affordance. Pre-fill the
+    // inputs either way so the row is correct if the user clicks "Add"
+    // and the row appears.
+    var hasAnyDate = !!(card.startDate || card.dueDate || card.dueTime);
+    if (hasAnyDate) {
+      datesRowEl.hidden = false;
+      datesAddBtn.hidden = true;
+    } else {
+      datesRowEl.hidden = true;
+      datesAddBtn.hidden = false;
+    }
+    // Optional sections (attachments / checklist / comments) start
+    // hidden and load async; the data-arrival callbacks toggle the
+    // "+ Add X" affordance vs the full section based on whether the
+    // list ends up non-empty. Activity is collapsed by default.
+    attachmentsSectionEl.hidden = true;
+    attachmentsAddAffordance.hidden = false;
     refreshAttachments(id);
-    checklistSectionEl.hidden = false;
+    checklistSectionEl.hidden = true;
+    checklistAddAffordance.hidden = false;
     checklistInputEl.value = '';
     requestChecklistItems(id);
-    commentsSectionEl.hidden = false;
+    commentsSectionEl.hidden = true;
+    commentsAddAffordance.hidden = false;
     commentInputEl.value = '';
     commentPostBtn.disabled = false;
     requestComments(id);
     activitySectionEl.hidden = false;
+    setActivityCollapsed(true);
     requestCardEvents(id);
     // Parent/Children: load this card's parent state + request live
     // children list. Archived cards skip the live request because we
@@ -3966,7 +4117,52 @@ const kanbanClientJs = `
   }
 
   cancelBtn.addEventListener('click', closeModal);
+  xCloseBtn.addEventListener('click', closeModal);
   modalEl.addEventListener('click', function(e) { if (e.target === modalEl) closeModal(); });
+
+  // Hide-until-add: clicking an affordance reveals the section and
+  // hides the affordance. Focusing the first input makes the next
+  // action obvious. (Added 2026-05.)
+  function revealDatesRow() {
+    datesRowEl.hidden = false;
+    datesAddBtn.hidden = true;
+    startInput.focus();
+  }
+  function hideDatesRow() {
+    startInput.value = '';
+    dueInput.value = '';
+    dueTimeInput.value = '';
+    datesRowEl.hidden = true;
+    datesAddBtn.hidden = false;
+  }
+  datesAddBtn.addEventListener('click', revealDatesRow);
+  datesClearBtn.addEventListener('click', hideDatesRow);
+
+  attachmentsAddAffordance.addEventListener('click', function() {
+    attachmentsSectionEl.hidden = false;
+    attachmentsAddAffordance.hidden = true;
+    if (attachmentInputEl) attachmentInputEl.click();
+  });
+  checklistAddAffordance.addEventListener('click', function() {
+    checklistSectionEl.hidden = false;
+    checklistAddAffordance.hidden = true;
+    checklistInputEl.focus();
+  });
+  commentsAddAffordance.addEventListener('click', function() {
+    commentsSectionEl.hidden = false;
+    commentsAddAffordance.hidden = true;
+    commentInputEl.focus();
+  });
+
+  // Activity is collapsed by default to keep the modal short. (Added 2026-05.)
+  function setActivityCollapsed(collapsed) {
+    activityBodyEl.hidden = collapsed;
+    activityCaretEl.textContent = collapsed ? '▸' : '▾';
+    activityToggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+  activityToggleBtn.addEventListener('click', function() {
+    setActivityCollapsed(!activityBodyEl.hidden);
+  });
 
   formEl.addEventListener('submit', function(e) {
     e.preventDefault();
@@ -3987,7 +4183,9 @@ const kanbanClientJs = `
         title: title,
         groups: selectedGroups.slice(),
         assigneeUserIds: assigneeIds,
-        assigned: assignedInput.value.trim() || null,
+        // Legacy "assigned" field is no longer settable from the UI;
+        // new cards start with it null.
+        assigned: null,
         notes: notesInput.value.trim() || null,
         startDate: startInput.value || null,
         dueDate: dueInput.value || null,
@@ -4006,11 +4204,13 @@ const kanbanClientJs = `
       // changed it — sending it every time would log a parent_set or
       // parent_cleared event on every edit, which is noisy.
       var origParent = typeof card.parentCardId === 'number' ? card.parentCardId : null;
+      // Don't include assigned in the patch at all — UpdateCardPatch
+      // treats undefined as "don't touch", so existing legacy values
+      // pass through untouched even though there's no input for them.
       var patchObj = {
         title: title,
         groups: selectedGroups.slice(),
         assigneeUserIds: assigneeIds,
-        assigned: assignedInput.value.trim() || null,
         notes: notesInput.value.trim() || null,
         startDate: startInput.value || null,
         dueDate: dueInput.value || null,

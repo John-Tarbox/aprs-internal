@@ -263,6 +263,10 @@ export interface CardDto {
   /** Direct children whose column is the last column on this board (by
    *  position). Drives the parent-card roll-up progress. */
   childDoneCount: number;
+  /** Total comments on this card (bulk-loaded). Drives the tile's
+   *  "💬 N" indicator. Separate from `hasUnreadComments`, which carries
+   *  the per-viewer unread state. */
+  commentCount: number;
   version: number;
   createdByUserId: number | null;
   updatedByUserId: number | null;
@@ -301,6 +305,7 @@ function hydrateCard(
   assignees: AssigneeDto[],
   childCount: number,
   childDoneCount: number,
+  commentCount: number,
   hasUnreadComments?: boolean
 ): CardDto {
   const out: CardDto = {
@@ -321,6 +326,7 @@ function hydrateCard(
     parentCardId: row.parent_card_id,
     childCount,
     childDoneCount,
+    commentCount,
     version: row.version,
     createdByUserId: row.created_by_user_id,
     updatedByUserId: row.updated_by_user_id,
@@ -458,6 +464,42 @@ async function loadChildCountsForCards(
     });
   }
   return map;
+}
+
+/** Bulk-load per-card comment counts. Single query for the whole
+ *  snapshot, returned as a `cardId -> count` map. Cards with zero
+ *  comments are simply absent from the map; callers default to 0. */
+async function loadCommentCountsForCards(
+  db: D1Database,
+  cardIds: number[]
+): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  if (cardIds.length === 0) return map;
+  const placeholders = cardIds.map(() => '?').join(',');
+  const res = await db
+    .prepare(
+      `SELECT card_id, COUNT(*) AS n
+       FROM kanban_card_comments
+       WHERE card_id IN (${placeholders})
+       GROUP BY card_id`
+    )
+    .bind(...cardIds)
+    .all<{ card_id: number; n: number }>();
+  for (const r of res.results ?? []) {
+    map.set(r.card_id, Number(r.n) || 0);
+  }
+  return map;
+}
+
+async function loadCommentCountForCard(
+  db: D1Database,
+  cardId: number
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM kanban_card_comments WHERE card_id = ?`)
+    .bind(cardId)
+    .first<{ n: number }>();
+  return Number(row?.n) || 0;
 }
 
 /** Single-card variant. Resolves the board internally so callers don't
@@ -1676,10 +1718,11 @@ export async function listCards(
   const res = await stmt.all<UnreadRow>();
   const rows = res.results ?? [];
   const ids = rows.map((r) => r.id);
-  const [groups, assignees, childCounts] = await Promise.all([
+  const [groups, assignees, childCounts, commentCounts] = await Promise.all([
     loadGroupsForCards(db, ids),
     loadAssigneesForCards(db, ids),
     loadChildCountsForCards(db, ids, boardId),
+    loadCommentCountsForCards(db, ids),
   ]);
   return rows.map((r) => {
     const cc = childCounts.get(r.id) ?? { total: 0, done: 0 };
@@ -1689,6 +1732,7 @@ export async function listCards(
       assignees.get(r.id) ?? [],
       cc.total,
       cc.done,
+      commentCounts.get(r.id) ?? 0,
       viewerUserId !== undefined ? !!r.has_unread_comments : undefined
     );
   });
@@ -1731,10 +1775,11 @@ export async function listArchivedCards(
     .all<RawCardRow>();
   const rows = res.results ?? [];
   const ids = rows.map((r) => r.id);
-  const [groups, assignees, childCounts] = await Promise.all([
+  const [groups, assignees, childCounts, commentCounts] = await Promise.all([
     loadGroupsForCards(db, ids),
     loadAssigneesForCards(db, ids),
     loadChildCountsForCards(db, ids, boardId),
+    loadCommentCountsForCards(db, ids),
   ]);
   return rows.map((r) => {
     const cc = childCounts.get(r.id) ?? { total: 0, done: 0 };
@@ -1743,7 +1788,8 @@ export async function listArchivedCards(
       groups.get(r.id) ?? [],
       assignees.get(r.id) ?? [],
       cc.total,
-      cc.done
+      cc.done,
+      commentCounts.get(r.id) ?? 0
     );
   });
 }
@@ -1850,7 +1896,8 @@ export async function createCard(
   // Reload groups with color now that they've been ensured in kanban_groups.
   const groupDtos = await loadGroupsForCard(db, row.id);
   // New cards have no children yet, so the roll-up is always 0/0.
-  return hydrateCard(row, groupDtos, assignees, 0, 0);
+  // New cards have no children + no comments yet, so all rollups are 0.
+  return hydrateCard(row, groupDtos, assignees, 0, 0, 0);
 }
 
 export interface UpdateCardPatch {
@@ -1939,12 +1986,14 @@ export async function updateCard(
       .first<RawCardRow>();
     if (!row) return null;
     const cc = await loadChildCountsForCard(db, id);
+    const cn = await loadCommentCountForCard(db, id);
     return hydrateCard(
       row,
       await loadGroupsForCard(db, id),
       await loadAssigneesForCard(db, id),
       cc.total,
-      cc.done
+      cc.done,
+      cn
     );
   }
 
@@ -2000,7 +2049,8 @@ export async function updateCard(
   const finalGroups = await loadGroupsForCard(db, id);
   const finalAssignees = await loadAssigneesForCard(db, id);
   const cc = await loadChildCountsForCard(db, id);
-  return hydrateCard(row, finalGroups, finalAssignees, cc.total, cc.done);
+  const cn = await loadCommentCountForCard(db, id);
+  return hydrateCard(row, finalGroups, finalAssignees, cc.total, cc.done, cn);
 }
 
 export interface AffectedPosition {
@@ -2182,8 +2232,9 @@ export async function moveCard(
   const movedGroups = await loadGroupsForCard(db, id);
   const movedAssignees = await loadAssigneesForCard(db, id);
   const movedCc = await loadChildCountsForCard(db, id);
+  const movedCn = await loadCommentCountForCard(db, id);
   return {
-    card: hydrateCard(movedRow, movedGroups, movedAssignees, movedCc.total, movedCc.done),
+    card: hydrateCard(movedRow, movedGroups, movedAssignees, movedCc.total, movedCc.done, movedCn),
     fromColumn,
     toColumn,
     affected: (affectedRows.results ?? []).map((r) => ({
@@ -2304,13 +2355,15 @@ export async function archiveCard(
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
   const archivedCc = await loadChildCountsForCard(db, id);
+  const archivedCn = await loadCommentCountForCard(db, id);
   return {
     card: hydrateCard(
       row,
       await loadGroupsForCard(db, id),
       await loadAssigneesForCard(db, id),
       archivedCc.total,
-      archivedCc.done
+      archivedCc.done,
+      archivedCn
     ),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
@@ -2372,13 +2425,15 @@ export async function unarchiveCard(
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
   const unarchivedCc = await loadChildCountsForCard(db, id);
+  const unarchivedCn = await loadCommentCountForCard(db, id);
   return {
     card: hydrateCard(
       row,
       await loadGroupsForCard(db, id),
       await loadAssigneesForCard(db, id),
       unarchivedCc.total,
-      unarchivedCc.done
+      unarchivedCc.done,
+      unarchivedCn
     ),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
