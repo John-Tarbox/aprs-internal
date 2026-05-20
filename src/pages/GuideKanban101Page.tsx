@@ -1,8 +1,9 @@
 /**
  * Kanban 101 — onboarding guide for new team members. Modeled on Trello's
- * /guide/trello-101: four sections (Boards → Columns → Cards → Board
- * controls), one illustration per section, sticky table of contents on
- * the left at desktop widths, ~5-minute read.
+ * /guide/trello-101: five sections (Boards → Columns → Cards → Hierarchy
+ * & outlines → Board controls), one illustration per section where
+ * available, sticky table of contents on the left at desktop widths,
+ * ~5-minute read.
  *
  * Linked from the top nav, footer, the keyboard-shortcut overlay, and
  * the empty-board state on /kanban/<slug>.
@@ -34,6 +35,7 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
             <li><a href="#boards" data-toc="boards">Boards</a></li>
             <li><a href="#columns" data-toc="columns">Columns</a></li>
             <li><a href="#cards" data-toc="cards">Cards</a></li>
+            <li><a href="#hierarchy" data-toc="hierarchy">Hierarchy &amp; outlines</a></li>
             <li><a href="#controls" data-toc="controls">Controls &amp; views</a></li>
           </ol>
           <p class="guide-toc-foot muted">
@@ -169,10 +171,13 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               your mind.
             </p>
             <p>
-              When someone else comments on a card you haven't opened
-              recently, a small speech-bubble icon appears in the corner of
-              that card's tile on the board. Open the card to clear it. Your
-              own comments don't trigger the indicator.
+              Every card with comments shows a <strong>💬 N</strong> badge
+              on its tile, where N is the total. The badge brightens (bold
+              and blue) when there are comments from other people that you
+              haven't seen since your last visit to that card. Open the
+              card to clear the unread treatment; the total count stays.
+              Counts update live as comments come in or go out — no
+              refresh needed.
             </p>
             <p>
               <strong>Managing labels (staff):</strong> the
@@ -186,6 +191,77 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               <strong>Pro tip:</strong> <code>@mention</code> a teammate in
               a comment to send them a notification. The bell icon in the
               top nav shows your unread mentions and assignments.
+            </aside>
+          </section>
+
+          <section id="hierarchy" class="guide-section">
+            <h2>Hierarchy &amp; outlines</h2>
+            <p>
+              Cards can have a <strong>parent</strong>. A parent typically
+              represents a larger goal — an epic, a project, a release —
+              and its children are the actionable pieces that roll up to
+              it. Parent and child must live on the same board, and the
+              chain can go as deep as you need.
+            </p>
+            <p>
+              In the card detail modal, the <strong>Parent</strong> row
+              lets you pick another card on this board by typing its
+              title or <code>#id</code>. The <strong>Children</strong>{' '}
+              section shows the direct children inline; click <code>+ Add
+              child</code> to spin up a new card already linked to the
+              one you're looking at.
+            </p>
+            <p>
+              On the board itself, parent and child cards advertise their
+              relationship at a glance:
+            </p>
+            <ul>
+              <li>
+                A child card shows an <code>↗ Parent title</code> chip at
+                the top of its tile. Click the chip to jump to the parent.
+              </li>
+              <li>
+                A parent card shows a <code>🧩 N/M</code> badge with a
+                thin progress strip — N children in the rightmost column,
+                M children total. The board's <em>last</em> column counts
+                as "done" for this rollup, so the badge updates as you
+                drag children rightward.
+              </li>
+            </ul>
+
+            <h3 class="guide-h3">Import a Word/Docs outline</h3>
+            <p>
+              Staff can paste a hierarchical outline into{' '}
+              <code>Import outline</code> on any board's toolbar — the
+              parser recognizes Word's classic <code>1. / a. / i. / 1.</code>{' '}
+              marker rotation (no indentation required) plus tab indentation
+              and <code>1.2.3</code> dotted-numeric prefixes. Each line
+              becomes a card; body paragraphs under a heading become its
+              notes; the marker hierarchy becomes the parent/child tree.
+              You'll see a preview before any cards are created.
+            </p>
+            <figure class="guide-figure">
+              <pre class="guide-outline-sample">{outlineSample}</pre>
+              <figcaption>
+                A pasted outline like this becomes 6 cards in a 3-deep tree.
+              </figcaption>
+            </figure>
+
+            <h3 class="guide-h3">Display a board as an outline</h3>
+            <p>
+              The inverse: click <code>View as outline</code> on any board
+              to see all its active cards as a nested numbered list,
+              auto-rotating <code>1, 2, 3</code> →{' '}
+              <code>a, b, c</code> → <code>i, ii, iii</code> at each
+              depth. Click any title to jump back to that card on the
+              board. The page is print-friendly — Cmd/Ctrl+P gives you a
+              clean handout without the app chrome.
+            </p>
+            <aside class="guide-tip">
+              <strong>Pro tip:</strong> if you do a lot of planning in
+              Word or Google Docs, draft your outline there, paste it via
+              Import outline to seed the board, then use View as outline
+              to share the result back as a printable document.
             </aside>
           </section>
 
@@ -210,12 +286,15 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               <li><code>is:overdue</code>, <code>is:mine</code>, <code>is:archived</code></li>
             </ul>
             <p>
-              The same data can be viewed four different ways from the top
-              nav: <a href="/kanban">Boards</a> (kanban),
+              The same data can be viewed several different ways from the
+              top nav: <a href="/kanban">Boards</a> (kanban),
               <a href="/table"> Table</a>, <a href="/calendar"> Calendar</a>,
-              and <a href="/timeline"> Timeline</a>. Use the table view when
-              you want to sort by due date or scan a long list; use the
-              calendar to see what's due this week.
+              and <a href="/timeline"> Timeline</a>. Use the table view
+              when you want to sort by due date or scan a long list; use
+              the calendar to see what's due this week. Each board also
+              has a per-board <code>View as outline</code> page (covered
+              in the previous section) for a hierarchical, print-friendly
+              read-out.
             </p>
             <aside class="guide-tip">
               <strong>Pro tip:</strong> press <kbd>?</kbd> from anywhere to
@@ -236,6 +315,18 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
     </Layout>
   );
 };
+
+/** Mini sample shown in the "Import an outline" figure. Kept short
+ *  enough to read in one glance — the real parser handles much deeper
+ *  nesting and longer titles. */
+const outlineSample = [
+  '1. Launch Mobile App',
+  '   a. Build Login Screen',
+  '      i. Design UI',
+  '      ii. Write API endpoint',
+  '   b. Build Settings Screen',
+  '2. Launch Marketing Site',
+].join('\n');
 
 const css = `
   /* Page-level layout — sticky TOC on the left, prose on the right at
@@ -320,6 +411,23 @@ const css = `
     margin: 0 0 12px;
     font-size: 1.45em;
     line-height: 1.2;
+  }
+  .guide-h3 {
+    margin: 28px 0 8px;
+    font-size: 1.05em;
+    font-weight: 600;
+    opacity: 0.85;
+  }
+  .guide-outline-sample {
+    margin: 0;
+    padding: 12px 14px;
+    background: rgba(128,128,128,0.08);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.88em;
+    line-height: 1.6;
+    white-space: pre;
+    overflow-x: auto;
   }
   .guide-section p { line-height: 1.6; max-width: 65ch; }
   .guide-section ul { line-height: 1.7; padding-left: 20px; max-width: 65ch; }
