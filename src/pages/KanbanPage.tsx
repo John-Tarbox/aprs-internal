@@ -4567,13 +4567,14 @@ const kanbanClientJs = `
         renderCommentsList();
         return;
       case 'comment_created':
-        // Mark the card as having an unread comment whenever someone
-        // *else* posts and the viewer doesn't currently have that card's
-        // modal open. Optimistic; the next refresh confirms via the
-        // server-computed hasUnreadComments flag in the snapshot.
-        if (msg.comment && msg.comment.authorUserId !== currentUser.id) {
-          var targetCard = cards.get(msg.comment.cardId);
-          if (targetCard) {
+        if (!msg.comment) return;
+        // Bump the tile's commentCount badge for everyone — including
+        // the author's own client — so 💬 N stays in sync without
+        // waiting for a board refresh. (Added 2026-05.)
+        var targetCard = cards.get(msg.comment.cardId);
+        if (targetCard) {
+          targetCard.commentCount = (targetCard.commentCount || 0) + 1;
+          if (msg.comment.authorUserId !== currentUser.id) {
             var modalOpenForThisCard = !modalEl.hidden && editingCardId === msg.comment.cardId;
             if (modalOpenForThisCard) {
               // The user is staring at the card; treat the comment as
@@ -4581,16 +4582,24 @@ const kanbanClientJs = `
               var cmidView = nextClientMsgId();
               pendingClientMsgs.set(cmidView, { type: 'mark_card_viewed', cardId: msg.comment.cardId });
               send({ type: 'mark_card_viewed', clientMsgId: cmidView, cardId: msg.comment.cardId });
-            } else if (!targetCard.hasUnreadComments) {
+            } else {
               targetCard.hasUnreadComments = true;
-              upsertCard(targetCard);
             }
+          }
+          upsertCard(targetCard);
+        } else {
+          // Card may be archived rather than active. Bump its archive-
+          // copy count too so the drawer reflects reality if it's open.
+          var archivedTarget = archivedCards.get(msg.comment.cardId);
+          if (archivedTarget) {
+            archivedTarget.commentCount = (archivedTarget.commentCount || 0) + 1;
+            if (!archiveSectionEl.hidden) renderArchived();
           }
         }
         // A comment may be created on any card; only render if the modal
         // is showing that card. Append to thread (oldest-first ordering)
         // and clear the composer if this client posted it.
-        if (!msg.comment || commentsByCardId !== msg.comment.cardId) return;
+        if (commentsByCardId !== msg.comment.cardId) return;
         commentList.push(msg.comment);
         renderCommentsList();
         if (msg.comment.authorUserId === currentUser.id) {
@@ -4611,6 +4620,20 @@ const kanbanClientJs = `
         renderCommentsList();
         return;
       case 'comment_deleted':
+        // Decrement the tile's commentCount so 💬 N stays in sync.
+        // The broadcast doesn't carry author info, so we can't update
+        // hasUnreadComments precisely — the next snapshot reconciles.
+        var deletedCard = cards.get(msg.cardId);
+        if (deletedCard && typeof deletedCard.commentCount === 'number' && deletedCard.commentCount > 0) {
+          deletedCard.commentCount -= 1;
+          upsertCard(deletedCard);
+        } else {
+          var archivedDeleted = archivedCards.get(msg.cardId);
+          if (archivedDeleted && typeof archivedDeleted.commentCount === 'number' && archivedDeleted.commentCount > 0) {
+            archivedDeleted.commentCount -= 1;
+            if (!archiveSectionEl.hidden) renderArchived();
+          }
+        }
         if (commentsByCardId !== msg.cardId) return;
         commentList = commentList.filter(function(c) { return c.id !== msg.id; });
         renderCommentsList();
