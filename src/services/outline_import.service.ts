@@ -43,38 +43,120 @@ export interface OutlineParseResult {
   warnings: string[];
 }
 
+/** Marker class used by Word-style multilevel outlines. Each class is
+ *  treated as an independent "series" — depth comes from the order in
+ *  which new series open, not from indentation. */
+type MarkerStyle =
+  | 'numeric'         // 1. 2. 3.   (or 1) 2) 3))
+  | 'numeric_dotted'  // 1.2.3      (explicit depth = dot count)
+  | 'alpha_lower'     // a. b. c.
+  | 'alpha_upper'     // A. B. C.
+  | 'roman_lower'     // i. ii. iii.
+  | 'roman_upper'     // I. II. III.
+  | 'bullet'          // - * •
+  | 'none';
+
+interface MarkerInfo {
+  style: MarkerStyle;
+  /** 1-based ordinal within the series — drives the "is this a new
+   *  series" (value === 1) vs "continuation" check. 0 for bullets. */
+  value: number;
+  /** Body text with the marker stripped (single space-trimmed). */
+  text: string;
+  /** For numeric_dotted only: the explicit dot-count depth. */
+  dottedDepth: number;
+  /** The original marker token (e.g. "1", "a", "ii", "iv"). Lets the
+   *  depth-assigner spot the alpha-vs-roman ambiguity for single
+   *  letters like "i" / "v" that could be either. */
+  literal: string;
+}
+
 interface RawLine {
   /** Indent level in source units (tab count or space count). */
   rawIndent: number;
-  /** Numbered-prefix depth if the line is "1.2 Foo" style; else 0. */
-  numberedDepth: number;
-  /** Title text with bullets/numbering stripped. */
-  text: string;
-  /** True when the line has a bullet/number marker — these always
-   *  start a NEW card. Plain text without a marker at the same indent
-   *  flows into the preceding card's notes. */
-  isHeading: boolean;
+  /** Marker style + value + cleaned text. style==='none' for plain
+   *  body paragraphs (which flow into the previous heading's notes). */
+  marker: MarkerInfo;
 }
 
-/** Strip the most common bullet/numbering prefixes. Returns the cleaned
- *  text and whether a marker was actually found (callers use that to
- *  decide heading-vs-notes). */
-function stripMarker(s: string): { text: string; hadMarker: boolean } {
-  // Roman / alpha / digit numbered: "1.", "1.2.3", "1)", "I.", "A."
-  let m = s.match(/^([0-9]+(?:\.[0-9]+)*[.)]|[IVXLCDM]+\.|[A-Z]\.)\s+(.*)$/);
-  if (m) return { text: m[2], hadMarker: true };
-  // Bullet glyphs commonly produced by Word/Google Docs/Markdown.
-  m = s.match(/^([-*•●○◦▪▫–—])\s+(.*)$/);
-  if (m) return { text: m[2], hadMarker: true };
-  return { text: s, hadMarker: false };
+/** Word's roman-numeral pattern. Cheap regex test — we don't validate
+ *  that "iiii" isn't a "real" roman numeral, but in outline context
+ *  any sequence of [ivxlcdm]+ followed by a marker punctuator is
+ *  almost certainly meant as a roman ordinal. */
+const ROMAN_LOWER_RE = /^([ivxlcdm]+)$/;
+const ROMAN_UPPER_RE = /^([IVXLCDM]+)$/;
+
+function romanToInt(s: string): number {
+  const map: Record<string, number> = { i: 1, v: 5, x: 10, l: 50, c: 100, d: 500, m: 1000 };
+  const lower = s.toLowerCase();
+  let total = 0;
+  for (let i = 0; i < lower.length; i++) {
+    const cur = map[lower[i]] ?? 0;
+    const next = map[lower[i + 1]] ?? 0;
+    total += cur < next ? -cur : cur;
+  }
+  return total;
 }
 
-/** Returns the dotted-prefix depth of "1.2.3 Foo" style lines, else 0. */
-function numberedPrefixDepth(s: string): number {
-  const m = s.match(/^([0-9]+(?:\.[0-9]+)*)(?:[.)])\s+/);
-  if (!m) return 0;
-  // "1." -> 1 segment -> depth 1; "1.2.3." -> 3 segments -> depth 3.
-  return m[1].split('.').length;
+/** Classify a (left-trimmed) line by its marker. Returns marker.style ===
+ *  'none' for plain body text. Ambiguous singletons like "i." (roman 1
+ *  vs the 9th letter) are returned as roman_lower when multi-char or
+ *  when only roman_lower would make sense; the caller breaks the tie
+ *  during depth assignment if needed. */
+function classifyMarker(line: string): MarkerInfo {
+  // 1. Dotted numeric (1.2.3 or 1.2.3.) — explicit depth.
+  let m = line.match(/^([0-9]+(?:\.[0-9]+)+)[.)]?\s+(.*)$/);
+  if (m) {
+    return {
+      style: 'numeric_dotted',
+      value: 0,
+      dottedDepth: m[1].split('.').length,
+      text: m[2],
+      literal: m[1],
+    };
+  }
+  // 2. Numeric single (1. 2. 3.) or with parenthesis (1) 2)).
+  m = line.match(/^([0-9]+)[.)]\s+(.*)$/);
+  if (m) {
+    const v = parseInt(m[1], 10);
+    return { style: 'numeric', value: v, dottedDepth: 0, text: m[2], literal: m[1] };
+  }
+  // 3. Multi-letter lowercase tokens — could be roman (ii, iii, iv) or
+  //    just alpha (only single letter is alpha in standard outlines).
+  m = line.match(/^([a-z]+)[.)]\s+(.*)$/);
+  if (m) {
+    const tok = m[1];
+    if (tok.length > 1 && ROMAN_LOWER_RE.test(tok)) {
+      return { style: 'roman_lower', value: romanToInt(tok), dottedDepth: 0, text: m[2], literal: tok };
+    }
+    if (tok.length === 1) {
+      // Single letter — ambiguous between alpha_lower (a..z) and
+      // roman_lower (i, v, x, l, c, d, m). Default to alpha_lower; the
+      // depth assigner promotes to roman_lower based on the literal
+      // character if alpha doesn't fit the active series stack.
+      const v = tok.charCodeAt(0) - 96;
+      return { style: 'alpha_lower', value: v, dottedDepth: 0, text: m[2], literal: tok };
+    }
+    return { style: 'none', value: 0, dottedDepth: 0, text: line, literal: '' };
+  }
+  // 4. Uppercase tokens — same logic.
+  m = line.match(/^([A-Z]+)[.)]\s+(.*)$/);
+  if (m) {
+    const tok = m[1];
+    if (tok.length > 1 && ROMAN_UPPER_RE.test(tok)) {
+      return { style: 'roman_upper', value: romanToInt(tok), dottedDepth: 0, text: m[2], literal: tok };
+    }
+    if (tok.length === 1) {
+      const v = tok.charCodeAt(0) - 64;
+      return { style: 'alpha_upper', value: v, dottedDepth: 0, text: m[2], literal: tok };
+    }
+    return { style: 'none', value: 0, dottedDepth: 0, text: line, literal: '' };
+  }
+  // 5. Bullet glyphs.
+  m = line.match(/^([-*•●○◦▪▫–—])\s+(.*)$/);
+  if (m) return { style: 'bullet', value: 0, dottedDepth: 0, text: m[2], literal: '' };
+  // 6. No marker — body text.
+  return { style: 'none', value: 0, dottedDepth: 0, text: line, literal: '' };
 }
 
 /** Detect the indent unit for space-indented outlines. Walks every
@@ -93,18 +175,20 @@ function detectSpaceIndent(lines: string[]): number {
   return Math.abs(smallest - 4) < Math.abs(smallest - 2) ? 4 : 2;
 }
 
-/** First pass: classify every non-empty line into a RawLine. The
- *  classification is purely textual; the second pass turns these into
- *  a tree using whichever indent signal dominates. */
+/** First pass: classify every non-empty line into a RawLine.
+ *  Each line ends up with (a) its leading indent in source units and
+ *  (b) its marker info. The second pass assigns depth using whichever
+ *  signal works for the document. */
 function classifyLines(input: string): RawLine[] {
   const lines = input.replace(/\r\n?/g, '\n').split('\n');
   const spaceUnit = detectSpaceIndent(lines);
   const out: RawLine[] = [];
   for (const rawLine of lines) {
-    // Preserve completely blank lines as paragraph separators inside
-    // notes (handled in pass 2); skip whitespace-only lines.
     if (/^\s*$/.test(rawLine)) {
-      out.push({ rawIndent: -1, numberedDepth: 0, text: '', isHeading: false });
+      out.push({
+        rawIndent: -1,
+        marker: { style: 'none', value: 0, dottedDepth: 0, text: '', literal: '' },
+      });
       continue;
     }
     let indent = 0;
@@ -120,19 +204,9 @@ function classifyLines(input: string): RawLine[] {
         body = body.slice(spaceMatch[1].length);
       }
     }
-    body = body.trim();
-    const numberedDepth = numberedPrefixDepth(body);
-    const { text, hadMarker } = stripMarker(body);
-    // A line is a heading when it has a marker OR is indented relative
-    // to the prior line. Whether "indented relative" applies is decided
-    // in pass 2; here we only record `hadMarker`. Pass 2 also treats
-    // every indent-0 line as a heading start when the previous heading
-    // is closed (next blank line or de-dent).
     out.push({
       rawIndent: indent,
-      numberedDepth,
-      text,
-      isHeading: hadMarker,
+      marker: classifyMarker(body.trim()),
     });
   }
   return out;
@@ -148,14 +222,143 @@ function classifyLines(input: string): RawLine[] {
 export function parseOutline(input: string): OutlineParseResult {
   const warnings: string[] = [];
   const raw = classifyLines(input);
-  // Decide which indent signal to honor. Numbered-prefix depth wins
-  // when ANY line has it (Word's "1. 1.1 1.1.1" outlines are usually
-  // pasted without indentation). Otherwise tab/space indentation is
-  // already encoded in rawIndent.
-  const anyNumbered = raw.some((l) => l.numberedDepth > 0);
-  let depthOf = (l: RawLine): number => l.rawIndent;
-  if (anyNumbered) {
-    depthOf = (l) => (l.numberedDepth > 0 ? l.numberedDepth - 1 : 0);
+
+  // Three depth strategies, picked per-line:
+  //
+  // 1. Dotted-numeric (1.2.3) — always honored when present on that line.
+  // 2. Marker series stack — when ANY line has a marker, depth comes
+  //    from the series the marker belongs to: each new "first" item
+  //    (value=1, "a", "i", "I") opens a new deeper series; continuations
+  //    truncate the stack back to the level that matches the marker
+  //    style. This handles Word's classic 1/a/i/1 nesting where depth
+  //    is implicit in the marker class, not indentation.
+  // 3. Tab/space indentation — fallback when neither of the above apply
+  //    (lines without markers get their depth from indent).
+  //
+  // Markers and indentation can also combine — an explicitly indented
+  // "1." line opens its series at that indent depth.
+  const anyMarker = raw.some(
+    (l) => l.marker.style !== 'none' && l.marker.style !== 'bullet'
+  );
+
+  // The active series stack: stack[k] tells us which marker style +
+  // last-seen value is "open" at depth k. Bullets and plain text don't
+  // sit on the stack — they just inherit the current depth.
+  const seriesStack: { style: MarkerStyle; lastValue: number }[] = [];
+
+  /** Decide what depth a line's marker should land at, mutating the
+   *  seriesStack to reflect the new state. Returns the chosen depth.
+   *
+   *  Rule: a value=1 marker (or the alpha "a", or "i"/"I" for roman) is
+   *  the START of a new series — these always open a fresh deeper
+   *  level, with depth = previous-heading-depth + 1. Continuations
+   *  (value > 1) look for the existing series by style on the stack and
+   *  resume at that depth.
+   *
+   *  This is what handles Word's classic 1/a/i/1 nesting: when a "1."
+   *  appears after an "i." (depth 2), it's recognized as starting a new
+   *  numeric sub-series at depth 3, even though numeric is already open
+   *  at depth 0. */
+  function placeInSeries(style: MarkerStyle, value: number): number {
+    if (value === 1) {
+      const newDepth = state.lastDepth + 1;
+      seriesStack.length = newDepth;
+      seriesStack.push({ style, lastValue: value });
+      return newDepth;
+    }
+    // Continuation lookup: prefer the STRICTEST match — value ===
+    // lastValue + 1 (sequential continuation). If none found, accept
+    // the deepest "loose" match where value > lastValue. This is the
+    // trick that makes the inner "1, 2, 3" series under "i. Foo"
+    // resolve correctly: when we see "2.", the inner NUM/1 is the
+    // strict-match candidate, even though an outer NUM/5 series is
+    // also open at depth 0.
+    let strictDepth = -1;
+    let looseDepth = -1;
+    for (let d = seriesStack.length - 1; d >= 0; d--) {
+      const entry = seriesStack[d];
+      if (entry.style !== style) continue;
+      if (value === entry.lastValue + 1) {
+        strictDepth = d;
+        break; // deepest strict match wins; we're scanning deep→shallow.
+      }
+      if (value > entry.lastValue && looseDepth === -1) {
+        looseDepth = d;
+      }
+    }
+    const matchDepth = strictDepth !== -1 ? strictDepth : looseDepth;
+    if (matchDepth !== -1) {
+      seriesStack.length = matchDepth + 1;
+      seriesStack[matchDepth].lastValue = value;
+      return matchDepth;
+    }
+    // No plausible existing series — push as a new deeper one.
+    const newDepth = state.lastDepth + 1;
+    seriesStack.length = newDepth;
+    seriesStack.push({ style, lastValue: value });
+    return newDepth;
+  }
+
+  /** Single-letter tokens (i, v, x, c, …) can mean alpha (9th, 22nd,
+   *  …) OR roman (1, 5, 10, …). Promote to roman in two cases:
+   *
+   *  1. The letter would be the EXACT next value in an already-open
+   *     roman series (e.g., "v." after "iv." — lastValue=4, romanVal=5).
+   *     This is a strict +1 continuation; it stops 'c' from being
+   *     mis-promoted to roman(100) when no roman series exists at
+   *     value 99.
+   *  2. The literal is "i" and an alpha series is already open at some
+   *     depth (the user is starting a NEW deeper roman series under
+   *     alpha — the conventional 1/a/i nesting). */
+  function disambiguateAlphaSingle(
+    style: MarkerStyle,
+    value: number,
+    literal: string
+  ): { style: MarkerStyle; value: number } {
+    const ROMAN_LOWER_VALUES: Record<string, number> = {
+      i: 1, v: 5, x: 10, l: 50, c: 100, d: 500, m: 1000,
+    };
+    const ROMAN_UPPER_VALUES: Record<string, number> = {
+      I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000,
+    };
+
+    if (style === 'alpha_lower') {
+      const romanVal = ROMAN_LOWER_VALUES[literal];
+      if (romanVal !== undefined) {
+        // Case 1: strict +1 continuation of an open roman_lower series.
+        for (let d = seriesStack.length - 1; d >= 0; d--) {
+          const e = seriesStack[d];
+          if (e.style === 'roman_lower' && romanVal === e.lastValue + 1) {
+            return { style: 'roman_lower', value: romanVal };
+          }
+        }
+        // Case 2: literal 'i' starting a new roman series under alpha.
+        if (
+          literal === 'i' &&
+          seriesStack.some((e) => e.style === 'alpha_lower')
+        ) {
+          return { style: 'roman_lower', value: 1 };
+        }
+      }
+    }
+    if (style === 'alpha_upper') {
+      const romanVal = ROMAN_UPPER_VALUES[literal];
+      if (romanVal !== undefined) {
+        for (let d = seriesStack.length - 1; d >= 0; d--) {
+          const e = seriesStack[d];
+          if (e.style === 'roman_upper' && romanVal === e.lastValue + 1) {
+            return { style: 'roman_upper', value: romanVal };
+          }
+        }
+        if (
+          literal === 'I' &&
+          seriesStack.some((e) => e.style === 'alpha_upper')
+        ) {
+          return { style: 'roman_upper', value: 1 };
+        }
+      }
+    }
+    return { style, value };
   }
 
   const roots: OutlineNode[] = [];
@@ -233,26 +436,52 @@ export function parseOutline(input: string): OutlineParseResult {
 
   let pendingBlank = false;
   for (const line of raw) {
-    if (line.rawIndent === -1 && line.text === '') {
-      // Blank line — paragraph separator inside notes; ignored if no
-      // open card.
+    // Blank line — paragraph separator inside notes.
+    if (line.rawIndent === -1 && line.marker.style === 'none' && line.marker.text === '') {
       pendingBlank = true;
       continue;
     }
-    const depth = Math.max(0, depthOf(line));
-    const looksLikeHeading =
-      line.isHeading || depth !== state.lastDepth || state.lastOpen === null;
-    if (looksLikeHeading) {
-      pushHeading(depth, line.text.slice(0, 200));
-      pendingBlank = false;
-    } else {
-      // Continuation paragraph at the same level. Preserve a paragraph
-      // break if a blank line preceded it.
+
+    const marker = line.marker;
+    // No marker AND no indent change → it's a continuation paragraph
+    // for the previous heading's notes.
+    if (marker.style === 'none') {
       const open = state.lastOpen;
       if (pendingBlank && open && open.notes) open.notes += '\n';
-      appendNotes(line.text);
+      appendNotes(marker.text);
       pendingBlank = false;
+      continue;
     }
+
+    // Compute the depth for this heading.
+    let depth: number;
+    if (marker.style === 'numeric_dotted') {
+      // Explicit depth wins — drops dot-numeric headings exactly where
+      // the dots say they go, ignoring whatever series state we held.
+      depth = Math.max(0, marker.dottedDepth - 1);
+      // Wipe series stack above this depth so subsequent style-based
+      // markers re-open from here.
+      seriesStack.length = depth;
+    } else if (marker.style === 'bullet') {
+      // Bullets inherit the most recent heading's depth + 1 (i.e., a
+      // bullet under "1. Foo" becomes a child of Foo). If there's no
+      // previous heading, fall back to indentation.
+      depth = state.lastOpen ? state.lastDepth + 1 : Math.max(0, line.rawIndent);
+    } else {
+      // Disambiguate "i" / "I" single letters that look like alpha but
+      // are actually the start of a deeper roman series.
+      const promoted = disambiguateAlphaSingle(marker.style, marker.value, marker.literal);
+      depth = placeInSeries(promoted.style, promoted.value);
+    }
+
+    // If markers don't apply at all (no markers in the entire doc),
+    // fall back to indentation for heading depth.
+    if (!anyMarker) {
+      depth = Math.max(0, line.rawIndent);
+    }
+
+    pushHeading(depth, marker.text.slice(0, 200));
+    pendingBlank = false;
   }
 
   // Trim notes — leading/trailing whitespace from accumulation +
