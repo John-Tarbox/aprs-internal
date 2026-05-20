@@ -81,6 +81,9 @@ export const KanbanPage: FC<KanbanPageProps> = ({
             Import outline
           </a>
         ) : null}
+        <a class="btn" href={`/kanban/${encodeURIComponent(board.slug)}/outline`} title="Display this board as a hierarchical outline">
+          View as outline
+        </a>
         <button id="kanban-archive-toggle" class="btn kanban-archive-toggle" type="button" aria-expanded="false">
           Show archived
         </button>

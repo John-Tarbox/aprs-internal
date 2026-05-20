@@ -24,6 +24,7 @@ import { KanbanPage } from '../pages/KanbanPage';
 import { KanbanBoardListPage } from '../pages/KanbanBoardListPage';
 import { BulkImportPage } from '../pages/BulkImportPage';
 import { OutlineImportPage } from '../pages/OutlineImportPage';
+import { OutlineViewPage } from '../pages/OutlineViewPage';
 import { commitImport, parseImportCsv } from '../services/bulk_import.service';
 import { parseOutline } from '../services/outline_import.service';
 import type { KanbanBoardDO } from '../durable/kanban.do';
@@ -40,6 +41,7 @@ import {
   listActiveUserDirectory,
   listAttachments,
   listBoardColumns,
+  listCards,
   listGroupsForBoard,
   MAX_BOARD_COLUMNS,
 } from '../services/kanban.service';
@@ -396,6 +398,29 @@ kanbanRoutes.post('/:slug/import', requireRole('staff'), async (c) => {
       302
     );
   }
+});
+
+// ── Outline view (display the parent/child tree as a numbered list) ────
+
+kanbanRoutes.get('/:slug/outline', async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  // Single fetch — listCards already returns parentCardId on every row,
+  // plus the column/position fields we need to sort siblings.
+  const [cards, columns] = await Promise.all([
+    listCards(c.env.DB, board.id, user.id),
+    listBoardColumns(c.env.DB, board.id),
+  ]);
+  return c.html(
+    <OutlineViewPage
+      user={user}
+      board={board}
+      cards={cards}
+      columns={columns}
+    />
+  );
 });
 
 // ── Outline import (paste a Word/Docs outline → tree of cards) ─────────
