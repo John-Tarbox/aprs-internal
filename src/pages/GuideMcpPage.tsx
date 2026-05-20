@@ -162,6 +162,15 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
                 <em>"Add a checklist to card 412 with these items: … and
                   mark the first three done."</em>
               </li>
+              <li>
+                <em>"Here's an outline I drafted in Word — import it as
+                  a tree of cards on the engineering board, with everything
+                  going into Not Started."</em>
+              </li>
+              <li>
+                <em>"Make card 412 a child of card 391, then list its
+                  siblings."</em>
+              </li>
             </ul>
             <p>
               Claude will usually narrate what it's about to do before
@@ -172,9 +181,12 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
             </p>
             <aside class="guide-tip">
               <strong>Pro tip:</strong> for bulk imports of more than
-              ~20 cards, ask Claude to use the <code>bulk_import_cards</code>{' '}
-              tool with a CSV — it's a single round-trip instead of one
-              tool call per card, much faster.
+              ~20 cards, ask Claude to use either <code>bulk_import_cards</code>{' '}
+              (flat CSV) or <code>import_outline</code> (hierarchical text
+              outline) — both are single-round-trip server-side imports
+              and much faster than one tool call per card. Outline import
+              is the right choice when you want parent/child relationships
+              between the cards.
             </aside>
           </section>
 
@@ -201,12 +213,14 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
 
             <h3 class="guide-h3">Cards</h3>
             <ul class="guide-tools">
-              <li><code>create_card</code> — new card with title, notes, labels, assignees, dates</li>
-              <li><code>update_card</code> — edit any card field (uses optimistic-concurrency versions)</li>
+              <li><code>create_card</code> — new card with title, notes, labels, assignees, dates, and an optional <code>parentCardId</code> to nest it under another card</li>
+              <li><code>update_card</code> — edit any card field, including reassigning the parent via <code>parentCardId</code> (uses optimistic-concurrency versions)</li>
               <li><code>move_card</code> — to a different column or position</li>
               <li><code>archive_card</code> · <code>unarchive_card</code> · <code>delete_card</code></li>
               <li><code>add_comment</code> — including <code>@mention</code> notifications</li>
               <li><code>add_checklist_item</code> · <code>set_checklist_item</code> · <code>delete_checklist_item</code></li>
+              <li><code>list_card_children</code> — direct children of a parent card (returns id, title, column, archived state)</li>
+              <li><code>import_outline</code> — paste a hierarchical outline (Word's <code>1./a./i./1.</code> markers, indentation, or <code>1.2.3</code> dotted-numeric prefixes); creates a tree of cards in one round-trip with parent/child links wired up</li>
             </ul>
 
             <h3 class="guide-h3">Columns (staff only)</h3>
