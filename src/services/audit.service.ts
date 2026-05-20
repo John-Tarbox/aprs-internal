@@ -22,7 +22,8 @@ export type AuditAction =
   | 'user.reactivated'
   | 'user.roles_changed'
   | 'admin.export'
-  | 'bulk.import';
+  | 'bulk.import'
+  | 'bulk.outline_import';
 
 export interface WriteAuditInput {
   userId?: number | null;

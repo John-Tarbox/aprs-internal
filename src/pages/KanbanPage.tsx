@@ -76,6 +76,11 @@ export const KanbanPage: FC<KanbanPageProps> = ({
             Import CSV
           </a>
         ) : null}
+        {isStaff ? (
+          <a class="btn" href={`/kanban/${encodeURIComponent(board.slug)}/import-outline`} title="Import a Word/Docs outline as a tree of cards">
+            Import outline
+          </a>
+        ) : null}
         <button id="kanban-archive-toggle" class="btn kanban-archive-toggle" type="button" aria-expanded="false">
           Show archived
         </button>
@@ -231,6 +236,31 @@ export const KanbanPage: FC<KanbanPageProps> = ({
               <textarea id="kf-notes" rows={4} maxlength={10000}></textarea>
               <span class="kf-notes-hint">Markdown supported: **bold**, *italic*, `code`, [link](https://…), bullet/numbered lists, # headings.</span>
             </label>
+            <section id="kf-parent" class="kf-parent" aria-label="Parent card">
+              <span class="kf-parent-label">Parent</span>
+              <span id="kf-parent-display" class="kf-parent-display kf-parent-none">(none)</span>
+              <div id="kf-parent-edit" class="kf-parent-edit" hidden>
+                <input type="text" id="kf-parent-input" list="kf-parent-suggest"
+                       placeholder="Type a card title or #id"
+                       aria-label="Pick a parent card" maxlength={200} />
+                <datalist id="kf-parent-suggest"></datalist>
+                <button type="button" id="kf-parent-set" class="btn">Set</button>
+                <button type="button" id="kf-parent-cancel" class="btn">Cancel</button>
+              </div>
+              <button type="button" id="kf-parent-change" class="btn kf-parent-change">Change</button>
+              <button type="button" id="kf-parent-clear" class="btn kf-parent-clear" hidden>Clear</button>
+            </section>
+            <section id="kf-children" class="kf-children" hidden aria-label="Children">
+              <h3 class="kf-children-title">Children <span id="kf-children-progress" class="kf-children-progress"></span></h3>
+              <ul id="kf-children-list" class="kf-children-list"></ul>
+              <p id="kf-children-empty" class="kf-children-empty muted" hidden>No children yet.</p>
+              <div class="kf-children-add">
+                <input type="text" id="kf-children-input" maxlength={200}
+                       placeholder="Add a child card title, press Enter"
+                       aria-label="New child card title" />
+                <button type="button" id="kf-children-add-btn" class="btn">Add child</button>
+              </div>
+            </section>
             <section id="kf-attachments" class="kf-attachments" hidden aria-label="Attachments">
               <h3 class="kf-attachments-title">Attachments</h3>
               <ul id="kf-attachments-list" class="kf-attachments-list"></ul>
@@ -625,6 +655,62 @@ const kanbanCss = `
   .kanban-card-notes a { color: inherit; text-decoration: underline; }
   .kf-notes-hint {
     display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
+  }
+
+  /* Parent / Children section in the card modal (added 2026-05). */
+  .kf-parent {
+    margin-top: 12px; padding: 8px 10px;
+    border: 1px solid rgba(128,128,128,0.25); border-radius: 6px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    font-size: 0.9em;
+  }
+  .kf-parent-label {
+    font-weight: 600; text-transform: uppercase; font-size: 0.75em;
+    letter-spacing: 0.06em; opacity: 0.65;
+  }
+  .kf-parent-display {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .kf-parent-none { opacity: 0.55; font-style: italic; }
+  .kf-parent-edit { display: flex; gap: 6px; flex-wrap: wrap; flex: 1 1 100%; }
+  .kf-parent-edit[hidden] { display: none; }
+  .kf-parent-edit input { flex: 1; min-width: 160px; }
+  .kf-children { margin-top: 16px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 12px; }
+  .kf-children[hidden] { display: none; }
+  .kf-children-title { margin: 0 0 8px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-children-progress { font-size: 0.85em; font-weight: normal; opacity: 0.7; margin-left: 6px; }
+  .kf-children-list { list-style: none; margin: 0 0 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .kf-children-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border: 1px solid rgba(128,128,128,0.2); border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .kf-children-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .kf-children-item-title:hover { text-decoration: underline; }
+  .kf-children-item-col {
+    font-size: 0.78em; padding: 2px 8px; border-radius: 999px;
+    background: rgba(128,128,128,0.15); white-space: nowrap;
+  }
+  .kf-children-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .kf-children-add input { flex: 1; min-width: 200px; }
+
+  /* Tile badges for parent breadcrumb + child progress (added 2026-05). */
+  .kanban-card-parentlink {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.78em; opacity: 0.7; margin-bottom: 4px;
+    cursor: pointer;
+  }
+  .kanban-card-parentlink:hover { opacity: 1; text-decoration: underline; }
+  .kanban-card-childbadge {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 6px; font-size: 0.78em;
+  }
+  .kanban-card-childbadge-progress {
+    flex: 1; height: 4px; background: rgba(128,128,128,0.2);
+    border-radius: 2px; overflow: hidden; max-width: 80px;
+  }
+  .kanban-card-childbadge-fill {
+    display: block; height: 100%; background: rgba(34,197,94,0.7);
   }
 
   /* Attachments in the card modal. */
@@ -1151,6 +1237,24 @@ const kanbanClientJs = `
   var checklistInputEl = document.getElementById('kf-checklist-input');
   var checklistAddBtn = document.getElementById('kf-checklist-add-btn');
   var checklistProgressEl = document.getElementById('kf-checklist-progress');
+  // Parent / Children panel (added 2026-05).
+  var parentDisplayEl = document.getElementById('kf-parent-display');
+  var parentEditEl = document.getElementById('kf-parent-edit');
+  var parentInputEl = document.getElementById('kf-parent-input');
+  var parentSuggestEl = document.getElementById('kf-parent-suggest');
+  var parentSetBtn = document.getElementById('kf-parent-set');
+  var parentCancelBtn = document.getElementById('kf-parent-cancel');
+  var parentChangeBtn = document.getElementById('kf-parent-change');
+  var parentClearBtn = document.getElementById('kf-parent-clear');
+  var childrenSectionEl = document.getElementById('kf-children');
+  var childrenProgressEl = document.getElementById('kf-children-progress');
+  var childrenListEl = document.getElementById('kf-children-list');
+  var childrenEmptyEl = document.getElementById('kf-children-empty');
+  var childrenInputEl = document.getElementById('kf-children-input');
+  var childrenAddBtn = document.getElementById('kf-children-add-btn');
+  // Mutable form state for the parent picker — null = "(none)", number
+  // = "pointing at parent id". Mirrors how coverColorState works.
+  var parentCardIdState = null;
 
   // Current user identity, parsed from a JSON island the server emits.
   // Used to gate inline edit/delete buttons. Falls back to a placeholder
@@ -2926,6 +3030,23 @@ const kanbanClientJs = `
       el.appendChild(cover);
     }
 
+    // Parent breadcrumb chip — shown when this card has a parent that's
+    // currently in our local cards Map. (If the parent is missing from
+    // the local snapshot, we still show "#id" so the relationship is
+    // visible.)
+    if (card.parentCardId) {
+      var parentLink = document.createElement('span');
+      parentLink.className = 'kanban-card-parentlink';
+      var parentCard = cards.get(card.parentCardId);
+      parentLink.textContent = '↗ ' + (parentCard ? parentCard.title : '#' + card.parentCardId);
+      parentLink.title = 'Open parent card';
+      parentLink.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        openEditModal(card.parentCardId, false);
+      });
+      el.appendChild(parentLink);
+    }
+
     var titleEl = document.createElement('div');
     titleEl.className = 'kanban-card-title';
     titleEl.textContent = card.title;
@@ -2976,6 +3097,32 @@ const kanbanClientJs = `
       notesEl.className = 'kanban-card-notes';
       renderMarkdownInto(card.notes, notesEl);
       el.appendChild(notesEl);
+    }
+
+    // Child-count / progress badge for parent cards. "Done" is server-
+    // computed (children whose column is the board's last column).
+    var childTotal = typeof card.childCount === 'number' ? card.childCount : 0;
+    if (childTotal > 0) {
+      var childDone = typeof card.childDoneCount === 'number' ? card.childDoneCount : 0;
+      var badge = document.createElement('div');
+      badge.className = 'kanban-card-childbadge';
+      var icon = document.createElement('span');
+      icon.textContent = '🧩';
+      icon.setAttribute('aria-hidden', 'true');
+      var count = document.createElement('span');
+      count.textContent = childDone + '/' + childTotal;
+      var bar = document.createElement('span');
+      bar.className = 'kanban-card-childbadge-progress';
+      bar.setAttribute('aria-label', 'Child completion: ' + childDone + ' of ' + childTotal);
+      var fill = document.createElement('span');
+      fill.className = 'kanban-card-childbadge-fill';
+      var pct = childTotal > 0 ? Math.round((childDone / childTotal) * 100) : 0;
+      fill.style.width = pct + '%';
+      bar.appendChild(fill);
+      badge.appendChild(icon);
+      badge.appendChild(count);
+      badge.appendChild(bar);
+      el.appendChild(badge);
     }
 
     // Unread-comments indicator: shown when the server marked this card
@@ -3493,6 +3640,189 @@ const kanbanClientJs = `
     send({ type: 'list_card_events', clientMsgId: cmid, cardId: cardId });
   }
 
+  // --- Parent / Children (added 2026-05) ---
+  // Track which card's children are currently rendered, so an out-of-
+  // order children_snapshot for a stale modal doesn't overwrite the
+  // active list. Mirrors attachmentsByCardId / checklistByCardId.
+  var childrenByCardId = 0;
+  var childrenList = [];
+
+  function renderParentDisplay() {
+    parentEditEl.hidden = true;
+    if (parentCardIdState === null) {
+      parentDisplayEl.textContent = '(none)';
+      parentDisplayEl.classList.add('kf-parent-none');
+      parentClearBtn.hidden = true;
+      parentChangeBtn.textContent = 'Set parent';
+    } else {
+      var parent = cards.get(parentCardIdState);
+      parentDisplayEl.textContent = parent ? ('↗ ' + parent.title) : ('↗ #' + parentCardIdState);
+      parentDisplayEl.classList.remove('kf-parent-none');
+      parentClearBtn.hidden = false;
+      parentChangeBtn.textContent = 'Change';
+    }
+  }
+
+  function refreshParentSuggestions() {
+    // Build a datalist of active cards on this board, excluding the
+    // card being edited (a card can't be its own parent). Limit to 200
+    // entries — beyond that the typeahead is fine as plain text input.
+    while (parentSuggestEl.firstChild) {
+      parentSuggestEl.removeChild(parentSuggestEl.firstChild);
+    }
+    var picked = 0;
+    cards.forEach(function(c) {
+      if (picked >= 200) return;
+      if (editingCardId !== null && c.id === editingCardId) return;
+      var opt = document.createElement('option');
+      // Datalist matches by value; show "#id Title" so users can type
+      // either piece.
+      opt.value = '#' + c.id + ' ' + c.title;
+      parentSuggestEl.appendChild(opt);
+      picked++;
+    });
+  }
+
+  function openParentEdit() {
+    parentEditEl.hidden = false;
+    parentInputEl.value = '';
+    refreshParentSuggestions();
+    parentInputEl.focus();
+  }
+
+  function commitParentFromInput() {
+    var raw = parentInputEl.value.trim();
+    if (!raw) {
+      parentEditEl.hidden = true;
+      return;
+    }
+    // Parse either "#123 Title" or "123" or "Title" — match by id first,
+    // then by exact title (case-insensitive).
+    var idMatch = raw.match(/^#?(\d+)/);
+    var picked = null;
+    if (idMatch) {
+      var n = parseInt(idMatch[1], 10);
+      if (cards.has(n)) picked = n;
+    }
+    if (picked === null) {
+      var lower = raw.toLowerCase();
+      cards.forEach(function(c) {
+        if (picked !== null) return;
+        if (c.title.toLowerCase() === lower) picked = c.id;
+      });
+    }
+    if (picked === null) {
+      showToast('No card matched. Pick one from the suggestions.', 3000);
+      return;
+    }
+    if (editingCardId !== null && picked === editingCardId) {
+      showToast("A card can't be its own parent.", 3000);
+      return;
+    }
+    parentCardIdState = picked;
+    renderParentDisplay();
+    // Re-render the board so the new parent breadcrumb shows on tiles.
+    // Save still needs to fire to persist server-side — display change
+    // here is pre-save state.
+  }
+
+  function clearParent() {
+    parentCardIdState = null;
+    renderParentDisplay();
+  }
+
+  function renderChildren() {
+    while (childrenListEl.firstChild) {
+      childrenListEl.removeChild(childrenListEl.firstChild);
+    }
+    if (childrenList.length === 0) {
+      childrenEmptyEl.hidden = false;
+      childrenProgressEl.textContent = '';
+      return;
+    }
+    childrenEmptyEl.hidden = true;
+    var done = 0;
+    var lastCol = null;
+    // The board's last column is the one with the highest position in
+    // columnConfig. Compute once per render.
+    var maxPos = -1;
+    columnConfig.forEach(function(cfg, key) {
+      if (cfg.position > maxPos) { maxPos = cfg.position; lastCol = key; }
+    });
+    childrenList.forEach(function(child) {
+      var li = document.createElement('li');
+      li.className = 'kf-children-item';
+      var titleSpan = document.createElement('span');
+      titleSpan.className = 'kf-children-item-title';
+      titleSpan.textContent = child.title;
+      titleSpan.title = 'Open this child card';
+      titleSpan.addEventListener('click', function() {
+        openEditModal(child.id, false);
+      });
+      var colSpan = document.createElement('span');
+      colSpan.className = 'kf-children-item-col';
+      var colCfg = columnConfig.get(child.column);
+      colSpan.textContent = colCfg ? colCfg.label : child.column;
+      li.appendChild(titleSpan);
+      li.appendChild(colSpan);
+      childrenListEl.appendChild(li);
+      if (lastCol && child.column === lastCol) done++;
+    });
+    childrenProgressEl.textContent = done + ' / ' + childrenList.length + ' done';
+  }
+
+  function requestChildren(cardId) {
+    childrenByCardId = cardId;
+    childrenList = [];
+    renderChildren();
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'list_children', cardId: cardId });
+    send({ type: 'list_child_cards', clientMsgId: cmid, cardId: cardId });
+  }
+
+  function addChildFromInput() {
+    if (editingCardId === null) return;
+    var title = childrenInputEl.value.trim();
+    if (!title) return;
+    var col = formEl.dataset.column || 'not_started';
+    var cmid = nextClientMsgId();
+    // Tag the pending op so we can refresh the children list on ack.
+    pendingClientMsgs.set(cmid, { type: 'create_child', parentId: editingCardId });
+    var ok = send({
+      type: 'create_card',
+      clientMsgId: cmid,
+      column: col,
+      title: title.slice(0, 200),
+      parentCardId: editingCardId,
+    });
+    if (ok) {
+      childrenInputEl.value = '';
+    } else {
+      showToast('Disconnected — try again when reconnected.', 3000);
+    }
+  }
+
+  parentChangeBtn.addEventListener('click', openParentEdit);
+  parentCancelBtn.addEventListener('click', function() {
+    parentEditEl.hidden = true;
+    parentInputEl.value = '';
+  });
+  parentSetBtn.addEventListener('click', commitParentFromInput);
+  parentInputEl.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      commitParentFromInput();
+    }
+  });
+  parentClearBtn.addEventListener('click', clearParent);
+  childrenAddBtn.addEventListener('click', addChildFromInput);
+  childrenInputEl.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      addChildFromInput();
+    }
+  });
+
   // --- Modal ---
   function openCreateModal(column) {
     editingCardId = null;
@@ -3532,6 +3862,13 @@ const kanbanClientJs = `
     attachmentsByCardId = 0;
     attachmentInputEl.value = '';
     attachmentStatusEl.textContent = '';
+    // Parent/Children: new card has no parent and no children yet.
+    parentCardIdState = null;
+    renderParentDisplay();
+    childrenSectionEl.hidden = true;
+    childrenList = [];
+    childrenByCardId = 0;
+    childrenInputEl.value = '';
     saveBtn.disabled = false;
     formEl.dataset.column = column;
     modalEl.hidden = false;
@@ -3583,6 +3920,19 @@ const kanbanClientJs = `
     requestComments(id);
     activitySectionEl.hidden = false;
     requestCardEvents(id);
+    // Parent/Children: load this card's parent state + request live
+    // children list. Archived cards skip the live request because we
+    // can't fetch via DO RPC on a tombstoned card cleanly; children
+    // section stays hidden in that case.
+    parentCardIdState = typeof card.parentCardId === 'number' ? card.parentCardId : null;
+    renderParentDisplay();
+    if (!fromArchive) {
+      childrenSectionEl.hidden = false;
+      childrenInputEl.value = '';
+      requestChildren(id);
+    } else {
+      childrenSectionEl.hidden = true;
+    }
     saveBtn.disabled = false;
     formEl.dataset.column = card.column;
     modalEl.hidden = false;
@@ -3643,6 +3993,7 @@ const kanbanClientJs = `
         dueDate: dueInput.value || null,
         dueTime: dueTimeInput.value || null,
         coverColor: coverColorState,
+        parentCardId: parentCardIdState,
       });
       if (!ok) showFormError('Disconnected — try again when reconnected.');
     } else {
@@ -3651,22 +4002,30 @@ const kanbanClientJs = `
         : cards.get(editingCardId);
       if (!card) { showFormError('Card no longer exists.'); return; }
       pendingClientMsgs.set(cmid, { type: 'update', id: editingCardId, archived: editingArchived });
+      // Only include parentCardId in the patch when the user actually
+      // changed it — sending it every time would log a parent_set or
+      // parent_cleared event on every edit, which is noisy.
+      var origParent = typeof card.parentCardId === 'number' ? card.parentCardId : null;
+      var patchObj = {
+        title: title,
+        groups: selectedGroups.slice(),
+        assigneeUserIds: assigneeIds,
+        assigned: assignedInput.value.trim() || null,
+        notes: notesInput.value.trim() || null,
+        startDate: startInput.value || null,
+        dueDate: dueInput.value || null,
+        dueTime: dueTimeInput.value || null,
+        coverColor: coverColorState,
+      };
+      if (parentCardIdState !== origParent) {
+        patchObj.parentCardId = parentCardIdState;
+      }
       var ok2 = send({
         type: 'update_card',
         clientMsgId: cmid,
         id: editingCardId,
         version: card.version,
-        patch: {
-          title: title,
-          groups: selectedGroups.slice(),
-          assigneeUserIds: assigneeIds,
-          assigned: assignedInput.value.trim() || null,
-          notes: notesInput.value.trim() || null,
-          startDate: startInput.value || null,
-          dueDate: dueInput.value || null,
-          dueTime: dueTimeInput.value || null,
-          coverColor: coverColorState,
-        },
+        patch: patchObj,
       });
       if (!ok2) showFormError('Disconnected — try again when reconnected.');
     }
@@ -3904,6 +4263,12 @@ const kanbanClientJs = `
       case 'card_created':
         ingestGroupsFromCard(msg.card);
         upsertCard(msg.card);
+        // If the newly-created card is a child of the card whose modal
+        // is open, refresh the modal's Children list. Cheaper than
+        // mutating in-place because the server may have reordered.
+        if (childrenByCardId && msg.card.parentCardId === childrenByCardId) {
+          requestChildren(childrenByCardId);
+        }
         return;
       case 'card_updated':
         ingestGroupsFromCard(msg.card);
@@ -3915,7 +4280,14 @@ const kanbanClientJs = `
         } else {
           upsertCard(msg.card);
         }
-        // If the modal is open on this card and the update was acked, closeModal runs via the ack handler.
+        // Parent re-assignment on a card whose new or former parent is
+        // currently rendered in the open modal's Children list requires
+        // a refresh.
+        if (childrenByCardId &&
+            (msg.card.parentCardId === childrenByCardId ||
+             childrenList.some(function(c){ return c.id === msg.card.id; }))) {
+          requestChildren(childrenByCardId);
+        }
         return;
       case 'card_moved':
         // Apply the canonical post-move positions for all touched cards.
@@ -4064,6 +4436,13 @@ const kanbanClientJs = `
         if (checklistByCardId !== msg.cardId) return;
         checklistItems = checklistItems.filter(function(i) { return i.id !== msg.id; });
         renderChecklist();
+        return;
+      case 'children_snapshot':
+        // Server's response to a list_child_cards request. Ignore
+        // out-of-order responses for stale modals.
+        if (childrenByCardId !== msg.cardId) return;
+        childrenList = (msg.children || []).slice();
+        renderChildren();
         return;
       case 'column_config_updated':
         // Single column's config changed (WIP limit, color, etc.).

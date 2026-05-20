@@ -21,6 +21,7 @@ import type { Env } from '../env';
 import {
   addBoardColumn,
   archiveCard,
+  bulkCreateCardTree,
   countCardsPerGroup,
   createCard,
   createChecklistItem,
@@ -38,6 +39,7 @@ import {
   listCardEvents,
   listCards,
   listChecklistItems,
+  listChildCards,
   listComments,
   listGroupsForBoard,
   logCardEvent,
@@ -56,7 +58,9 @@ import {
   updateComment,
   type CardDto,
   type CardEventDto,
+  type ChildCardSummary,
   type ColumnName,
+  type OutlineNode,
 } from '../services/kanban.service';
 import { normalizeHexColor } from '../util/colors';
 import {
@@ -169,6 +173,7 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     dueDate: dueDateSchema,
     dueTime: dueTimeSchema,
     coverColor: colorSchema,
+    parentCardId: z.number().int().positive().nullable().optional(),
   }),
   z.object({
     type: z.literal('update_card'),
@@ -185,7 +190,15 @@ const clientMsgSchema = z.discriminatedUnion('type', [
       dueDate: dueDateSchema,
       dueTime: dueTimeSchema,
       coverColor: colorSchema,
+      parentCardId: z.number().int().positive().nullable().optional(),
     }),
+  }),
+  z.object({
+    // Read-only: list a card's direct children. Used by the modal's
+    // Children panel. DO replies with { type: 'children_snapshot', ... }.
+    type: z.literal('list_child_cards'),
+    clientMsgId: z.string().max(64),
+    cardId: z.number().int().positive(),
   }),
   z.object({
     type: z.literal('move_card'),
@@ -524,6 +537,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
                 dueDate: parsed.dueDate ?? null,
                 dueTime: parsed.dueTime ?? null,
                 coverColor: parsed.coverColor ?? null,
+                parentCardId: parsed.parentCardId ?? null,
               },
               attachment.userId,
               attachment.isStaff,
@@ -533,6 +547,16 @@ export class KanbanBoardDO extends DurableObject<Env> {
           } catch (err) {
             this.sendOpError(ws, parsed.clientMsgId, err);
           }
+          return;
+        }
+        case 'list_child_cards': {
+          const { children } = await this.opListChildCards({ parentCardId: parsed.cardId });
+          this.sendTo(ws, {
+            type: 'children_snapshot',
+            cardId: parsed.cardId,
+            children,
+          });
+          this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           return;
         }
         case 'update_card': {
@@ -1165,6 +1189,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
       dueDate?: string | null;
       dueTime?: string | null;
       coverColor?: string | null;
+      parentCardId?: number | null;
     },
     actorUserId: number,
     actorIsStaff: boolean,
@@ -1175,25 +1200,43 @@ export class KanbanBoardDO extends DurableObject<Env> {
       actorIsStaff,
       input.groups
     );
-    const card = await createCard(
-      this.env.DB,
-      boardId,
-      {
-        column: input.column,
-        title: input.title,
-        groups: filteredGroups,
-        assigneeUserIds: input.assigneeUserIds,
-        assigned: input.assigned ?? null,
-        notes: input.notes ?? null,
-        startDate: input.startDate ?? null,
-        dueDate: input.dueDate ?? null,
-        dueTime: input.dueTime ?? null,
-        coverColor: input.coverColor
-          ? normalizeHexColor(input.coverColor)
-          : (input.coverColor ?? null),
-      },
-      actorUserId
-    );
+    let card: CardDto;
+    try {
+      card = await createCard(
+        this.env.DB,
+        boardId,
+        {
+          column: input.column,
+          title: input.title,
+          groups: filteredGroups,
+          assigneeUserIds: input.assigneeUserIds,
+          assigned: input.assigned ?? null,
+          notes: input.notes ?? null,
+          startDate: input.startDate ?? null,
+          dueDate: input.dueDate ?? null,
+          dueTime: input.dueTime ?? null,
+          coverColor: input.coverColor
+            ? normalizeHexColor(input.coverColor)
+            : (input.coverColor ?? null),
+          parentCardId: input.parentCardId ?? null,
+        },
+        actorUserId
+      );
+    } catch (err) {
+      // Translate parent-validation failures the same way opUpdateCard
+      // does — a bad parentCardId on create is a user error, not a
+      // database error.
+      const msg = (err as Error)?.message ?? 'invalid';
+      if (
+        msg.includes('parent') ||
+        msg.includes('cycle') ||
+        msg.includes('own parent') ||
+        msg.includes('same board')
+      ) {
+        throw new OpInvalidError(msg);
+      }
+      throw err;
+    }
     this.broadcast({ type: 'card_created', card });
     await this.emitCardEvent(card.id, actorUserId, 'card.created', {
       column: card.column,
@@ -1207,6 +1250,43 @@ export class KanbanBoardDO extends DurableObject<Env> {
       card.title
     );
     return card;
+  }
+
+  /** Bulk-create a tree of cards from a pre-parsed outline. Used by the
+   *  outline-import route. Broadcasts each card so live sessions see the
+   *  whole tree appear; logs a single `card.created` event per card and
+   *  one audit entry on the caller's side. */
+  async opBulkImportOutline(
+    input: {
+      column: ColumnName;
+      tree: OutlineNode[];
+    },
+    actorUserId: number,
+    boardId: number
+  ): Promise<{ created: CardDto[] }> {
+    const { created } = await bulkCreateCardTree(
+      this.env.DB,
+      boardId,
+      input.column,
+      input.tree,
+      actorUserId
+    );
+    for (const card of created) {
+      this.broadcast({ type: 'card_created', card });
+      await this.emitCardEvent(card.id, actorUserId, 'card.created', {
+        column: card.column,
+        position: card.position,
+        viaOutlineImport: true,
+      });
+    }
+    return { created };
+  }
+
+  /** Return active direct children of a parent card (for the modal's
+   *  Children section). Doesn't broadcast — read-only query. */
+  async opListChildCards(input: { parentCardId: number }): Promise<{ children: ChildCardSummary[] }> {
+    const children = await listChildCards(this.env.DB, input.parentCardId);
+    return { children };
   }
 
   async opUpdateCard(
@@ -1223,6 +1303,7 @@ export class KanbanBoardDO extends DurableObject<Env> {
         dueDate?: string | null;
         dueTime?: string | null;
         coverColor?: string | null;
+        parentCardId?: number | null;
       };
     },
     actorUserId: number,
@@ -1254,13 +1335,31 @@ export class KanbanBoardDO extends DurableObject<Env> {
         ),
       };
     }
-    const updated = await updateCard(
-      this.env.DB,
-      input.id,
-      input.version,
-      normalizedPatch,
-      actorUserId
-    );
+    let updated: CardDto | null;
+    try {
+      updated = await updateCard(
+        this.env.DB,
+        input.id,
+        input.version,
+        normalizedPatch,
+        actorUserId
+      );
+    } catch (err) {
+      // Parent-assignment validation failures arrive as plain Errors
+      // from the service layer (same-board / cycle / self-parent).
+      // Translate to OpInvalidError so the WebSocket nack carries the
+      // user-readable reason instead of falling through to db_error.
+      const msg = (err as Error)?.message ?? 'invalid';
+      if (
+        msg.includes('parent') ||
+        msg.includes('cycle') ||
+        msg.includes('own parent') ||
+        msg.includes('same board')
+      ) {
+        throw new OpInvalidError(msg);
+      }
+      throw err;
+    }
     if (!updated) {
       throw new OpVersionConflictError(await this.readVersion(input.id));
     }
@@ -1268,6 +1367,17 @@ export class KanbanBoardDO extends DurableObject<Env> {
     const changedFields = Object.keys(input.patch);
     if (changedFields.length > 0) {
       await this.emitCardEvent(updated.id, actorUserId, 'card.updated', { changedFields });
+    }
+    if (input.patch.parentCardId !== undefined) {
+      // Activity-log a dedicated event so a parent re-parent shows up
+      // distinctly on the card timeline (rather than just "updated").
+      if (input.patch.parentCardId === null) {
+        await this.emitCardEvent(updated.id, actorUserId, 'card.parent_cleared', {});
+      } else {
+        await this.emitCardEvent(updated.id, actorUserId, 'card.parent_set', {
+          parentCardId: input.patch.parentCardId,
+        });
+      }
     }
     if (priorAssigneeIds !== null) {
       await this.fanOutAssignmentNotifications(

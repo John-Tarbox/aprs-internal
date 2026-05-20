@@ -24,10 +24,12 @@ import {
   listBoards,
   listBoardColumns,
   listCards,
+  listChildCards,
   listGroupsForBoard,
   type BoardDto,
 } from '../services/kanban.service';
 import { commitImport, parseImportCsv } from '../services/bulk_import.service';
+import { parseOutline } from '../services/outline_import.service';
 import { findUserByEmail } from '../services/users.service';
 import type {
   KanbanBoardDO,
@@ -297,6 +299,7 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
         dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
         dueTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
         coverColor: z.string().regex(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).optional(),
+        parentCardId: z.number().int().positive().optional(),
       },
     },
     async (args, extra) => {
@@ -317,6 +320,7 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
             dueDate: args.dueDate ?? null,
             dueTime: args.dueTime ?? null,
             coverColor: args.coverColor ?? null,
+            parentCardId: args.parentCardId ?? null,
           },
           props.userId,
           props.isStaff,
@@ -343,6 +347,7 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
         dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
         dueTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
         coverColor: z.string().regex(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).nullable().optional(),
+        parentCardId: z.number().int().positive().nullable().optional(),
       },
     },
     async (args, extra) => {
@@ -365,6 +370,7 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
       if (args.dueDate !== undefined) patch.dueDate = args.dueDate;
       if (args.dueTime !== undefined) patch.dueTime = args.dueTime;
       if (args.coverColor !== undefined) patch.coverColor = args.coverColor;
+      if (args.parentCardId !== undefined) patch.parentCardId = args.parentCardId;
       const stub = getBoardDOStub(env, row.board_id);
       return runOp(() =>
         stub.opUpdateCard(
@@ -726,6 +732,60 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
       const board = await resolveBoardOrThrow(env, boardSlug);
       const stub = getBoardDOStub(env, board.id);
       return runOp(() => stub.opSetGroupColor({ name, color }, props.isStaff, board.id));
+    }
+  );
+
+  // ── Parent/child + outline import (added 2026-05) ──────────────────
+
+  server.registerTool(
+    'list_card_children',
+    {
+      description:
+        "List the direct (depth-1) active children of a parent card. Use this to inspect or walk down a card hierarchy.",
+      inputSchema: {
+        cardId: z.number().int().positive(),
+      },
+    },
+    async ({ cardId }) => {
+      // Read-only — no DO RPC needed, hit the service directly.
+      const children = await listChildCards(env.DB, cardId);
+      return toolOk({ children });
+    }
+  );
+
+  server.registerTool(
+    'import_outline',
+    {
+      description:
+        "Bulk-create a tree of cards from a hierarchical outline (e.g. pasted from Microsoft Word's Outline View). Indentation OR numbered prefixes (1, 1.1, 1.1.1) define the hierarchy; non-bullet lines under a heading become its notes. All cards land in the target column; reorder afterwards.",
+      inputSchema: {
+        boardSlug: z.string().min(1),
+        columnKey: z.string().min(1),
+        outline: z.string().min(1).max(100_000),
+      },
+    },
+    async ({ boardSlug, columnKey, outline }, extra) => {
+      const props = requireProps(extra);
+      const board = await resolveBoardOrThrow(env, boardSlug);
+      const parsed = parseOutline(outline);
+      if (parsed.tree.length === 0) {
+        return toolErr(
+          `invalid: ${parsed.warnings[0] ?? 'outline contained no usable rows'}`
+        );
+      }
+      const stub = getBoardDOStub(env, board.id);
+      return runOp(async () => {
+        const result = await stub.opBulkImportOutline(
+          { column: columnKey, tree: parsed.tree },
+          props.userId,
+          board.id
+        );
+        return {
+          createdCount: result.created.length,
+          maxDepth: parsed.maxDepth,
+          warnings: parsed.warnings,
+        };
+      });
     }
   );
 }
