@@ -253,6 +253,16 @@ export interface CardDto {
   coverColor: string | null;
   /** ISO timestamp when the card was archived (soft-deleted); null when active. */
   archivedAt: string | null;
+  /** Parent-child hierarchy (added 2026-05). Null = this card is top-
+   *  level; otherwise points to another card on the SAME board. Cycle-
+   *  free and same-board are app-layer invariants. */
+  parentCardId: number | null;
+  /** Direct (depth-1) child count. Computed at list time from
+   *  kanban_cards.parent_card_id. Zero when not a parent. */
+  childCount: number;
+  /** Direct children whose column is the last column on this board (by
+   *  position). Drives the parent-card roll-up progress. */
+  childDoneCount: number;
   version: number;
   createdByUserId: number | null;
   updatedByUserId: number | null;
@@ -277,6 +287,7 @@ interface RawCardRow {
   due_time: string | null;
   cover_color: string | null;
   archived_at: string | null;
+  parent_card_id: number | null;
   version: number;
   created_by_user_id: number | null;
   updated_by_user_id: number | null;
@@ -288,6 +299,8 @@ function hydrateCard(
   row: RawCardRow,
   groups: GroupDto[],
   assignees: AssigneeDto[],
+  childCount: number,
+  childDoneCount: number,
   hasUnreadComments?: boolean
 ): CardDto {
   const out: CardDto = {
@@ -305,6 +318,9 @@ function hydrateCard(
     dueTime: row.due_time,
     coverColor: row.cover_color,
     archivedAt: row.archived_at,
+    parentCardId: row.parent_card_id,
+    childCount,
+    childDoneCount,
     version: row.version,
     createdByUserId: row.created_by_user_id,
     updatedByUserId: row.updated_by_user_id,
@@ -388,6 +404,116 @@ async function loadAssigneesForCard(
 ): Promise<AssigneeDto[]> {
   const map = await loadAssigneesForCards(db, [cardId]);
   return map.get(cardId) ?? [];
+}
+
+/** Per-board "done" column key — the last column by position. Roll-up
+ *  semantics use this: a child counts as done when its column matches.
+ *  Returns null when the board has no columns configured (shouldn't
+ *  happen post-migration 0012, but defended for safety). */
+async function getLastColumnKey(
+  db: D1Database,
+  boardId: number
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT column_name FROM kanban_board_columns
+       WHERE board_id = ? ORDER BY position DESC LIMIT 1`
+    )
+    .bind(boardId)
+    .first<{ column_name: string }>();
+  return row?.column_name ?? null;
+}
+
+/** Bulk-load direct-child counts for a set of cards. Returns map
+ *  cardId -> { total, done } where "done" means the child's column
+ *  equals the board's last column by position. Single grouped query so
+ *  the board snapshot stays one round-trip regardless of card count. */
+async function loadChildCountsForCards(
+  db: D1Database,
+  cardIds: number[],
+  boardId: number
+): Promise<Map<number, { total: number; done: number }>> {
+  const map = new Map<number, { total: number; done: number }>();
+  if (cardIds.length === 0) return map;
+  const lastCol = await getLastColumnKey(db, boardId);
+  // archived children don't count toward the parent's roll-up — they
+  // represent abandoned/removed work, not completed work.
+  const placeholders = cardIds.map(() => '?').join(',');
+  const res = await db
+    .prepare(
+      `SELECT parent_card_id,
+              COUNT(*) AS total,
+              SUM(CASE WHEN column_name = ? THEN 1 ELSE 0 END) AS done
+       FROM kanban_cards
+       WHERE parent_card_id IN (${placeholders})
+         AND archived_at IS NULL
+       GROUP BY parent_card_id`
+    )
+    .bind(lastCol ?? '', ...cardIds)
+    .all<{ parent_card_id: number; total: number; done: number | null }>();
+  for (const r of res.results ?? []) {
+    map.set(r.parent_card_id, {
+      total: Number(r.total) || 0,
+      done: lastCol ? Number(r.done) || 0 : 0,
+    });
+  }
+  return map;
+}
+
+/** Single-card variant. Resolves the board internally so callers don't
+ *  need to thread boardId through every update/move path. */
+async function loadChildCountsForCard(
+  db: D1Database,
+  cardId: number
+): Promise<{ total: number; done: number }> {
+  const row = await db
+    .prepare(`SELECT board_id FROM kanban_cards WHERE id = ?`)
+    .bind(cardId)
+    .first<{ board_id: number }>();
+  if (!row) return { total: 0, done: 0 };
+  const map = await loadChildCountsForCards(db, [cardId], row.board_id);
+  return map.get(cardId) ?? { total: 0, done: 0 };
+}
+
+/** Validate a proposed parent assignment. Throws an Error with a
+ *  human-readable message if the assignment would be illegal. Null is
+ *  always valid (clears the parent). Pass `childId = null` when
+ *  creating a brand-new child — the same-board check still runs. */
+export async function validateParentAssignment(
+  db: D1Database,
+  childBoardId: number,
+  childId: number | null,
+  candidateParentId: number | null
+): Promise<void> {
+  if (candidateParentId === null) return;
+  if (childId !== null && candidateParentId === childId) {
+    throw new Error('A card cannot be its own parent.');
+  }
+  const parent = await db
+    .prepare(`SELECT id, board_id, parent_card_id FROM kanban_cards WHERE id = ?`)
+    .bind(candidateParentId)
+    .first<{ id: number; board_id: number; parent_card_id: number | null }>();
+  if (!parent) {
+    throw new Error(`Parent card ${candidateParentId} does not exist.`);
+  }
+  if (parent.board_id !== childBoardId) {
+    throw new Error('Parent must be on the same board as the child.');
+  }
+  // Cycle prevention: walk up the candidate's ancestor chain. If we
+  // encounter `childId`, attaching would create a loop. Cap at 64 steps
+  // to defend against pre-existing corruption.
+  if (childId === null) return;
+  let cursor: number | null = parent.parent_card_id;
+  for (let i = 0; i < 64 && cursor !== null; i++) {
+    if (cursor === childId) {
+      throw new Error('Cannot set parent: would create a cycle.');
+    }
+    const next: { parent_card_id: number | null } | null = await db
+      .prepare(`SELECT parent_card_id FROM kanban_cards WHERE id = ?`)
+      .bind(cursor)
+      .first<{ parent_card_id: number | null }>();
+    cursor = next?.parent_card_id ?? null;
+  }
 }
 
 /**
@@ -1550,18 +1676,22 @@ export async function listCards(
   const res = await stmt.all<UnreadRow>();
   const rows = res.results ?? [];
   const ids = rows.map((r) => r.id);
-  const [groups, assignees] = await Promise.all([
+  const [groups, assignees, childCounts] = await Promise.all([
     loadGroupsForCards(db, ids),
     loadAssigneesForCards(db, ids),
+    loadChildCountsForCards(db, ids, boardId),
   ]);
-  return rows.map((r) =>
-    hydrateCard(
+  return rows.map((r) => {
+    const cc = childCounts.get(r.id) ?? { total: 0, done: 0 };
+    return hydrateCard(
       r,
       groups.get(r.id) ?? [],
       assignees.get(r.id) ?? [],
+      cc.total,
+      cc.done,
       viewerUserId !== undefined ? !!r.has_unread_comments : undefined
-    )
-  );
+    );
+  });
 }
 
 /**
@@ -1601,13 +1731,21 @@ export async function listArchivedCards(
     .all<RawCardRow>();
   const rows = res.results ?? [];
   const ids = rows.map((r) => r.id);
-  const [groups, assignees] = await Promise.all([
+  const [groups, assignees, childCounts] = await Promise.all([
     loadGroupsForCards(db, ids),
     loadAssigneesForCards(db, ids),
+    loadChildCountsForCards(db, ids, boardId),
   ]);
-  return rows.map((r) =>
-    hydrateCard(r, groups.get(r.id) ?? [], assignees.get(r.id) ?? [])
-  );
+  return rows.map((r) => {
+    const cc = childCounts.get(r.id) ?? { total: 0, done: 0 };
+    return hydrateCard(
+      r,
+      groups.get(r.id) ?? [],
+      assignees.get(r.id) ?? [],
+      cc.total,
+      cc.done
+    );
+  });
 }
 
 export interface CreateCardInput {
@@ -1622,6 +1760,9 @@ export interface CreateCardInput {
   dueTime?: string | null;
   /** Optional cover color (#aabbcc). Null/undefined = no cover. */
   coverColor?: string | null;
+  /** Optional parent card id. Must be on the same board; cycle/self
+   *  checks are enforced by validateParentAssignment. */
+  parentCardId?: number | null;
 }
 
 export async function createCard(
@@ -1636,6 +1777,12 @@ export async function createCard(
   if (!(await columnExists(db, boardId, input.column))) {
     throw new Error(`Column "${input.column}" does not exist on this board`);
   }
+  // Parent FK is app-validated (same board, no cycle, not self). For a
+  // brand-new card the only relevant check is same-board, which the
+  // helper still enforces with childId=null.
+  if (input.parentCardId != null) {
+    await validateParentAssignment(db, boardId, null, input.parentCardId);
+  }
   // Append to the end of the target column on this board. MAX(position)
   // must only consider active (non-archived) cards — archived rows carry
   // position = -1 as a sentinel and must not influence new-card placement.
@@ -1643,14 +1790,14 @@ export async function createCard(
     .prepare(
       `INSERT INTO kanban_cards
          (board_id, column_name, position, title, assigned, notes,
-          start_date, due_date, due_time, cover_color,
+          start_date, due_date, due_time, cover_color, parent_card_id,
           created_by_user_id, updated_by_user_id)
        VALUES (
          ?,
          ?,
          (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
            WHERE board_id = ? AND column_name = ? AND archived_at IS NULL),
-         ?, ?, ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        )
        RETURNING *`
     )
@@ -1666,6 +1813,7 @@ export async function createCard(
       input.dueDate ?? null,
       input.dueTime ?? null,
       input.coverColor ?? null,
+      input.parentCardId ?? null,
       userId,
       userId
     )
@@ -1701,7 +1849,8 @@ export async function createCard(
   const assignees = await loadAssigneesForCard(db, row.id);
   // Reload groups with color now that they've been ensured in kanban_groups.
   const groupDtos = await loadGroupsForCard(db, row.id);
-  return hydrateCard(row, groupDtos, assignees);
+  // New cards have no children yet, so the roll-up is always 0/0.
+  return hydrateCard(row, groupDtos, assignees, 0, 0);
 }
 
 export interface UpdateCardPatch {
@@ -1717,9 +1866,16 @@ export interface UpdateCardPatch {
   dueTime?: string | null;
   /** Undefined = don't touch; null = clear cover; '#aabbcc' = set. */
   coverColor?: string | null;
+  /** Undefined = don't touch; null = clear parent; number = set parent.
+   *  Validated for same-board / cycle / not-self via
+   *  validateParentAssignment before the UPDATE fires. */
+  parentCardId?: number | null;
 }
 
-/** Returns the updated card, or null on version conflict / not found. */
+/** Returns the updated card, or null on version conflict / not found.
+ *  Throws (does not return null) when a parent-card assignment is
+ *  invalid — same-board / cycle / not-self violations are user errors
+ *  that should surface a specific message, not a silent no-op. */
 export async function updateCard(
   db: D1Database,
   id: number,
@@ -1758,6 +1914,18 @@ export async function updateCard(
     sets.push('cover_color = ?');
     binds.push(patch.coverColor ?? null);
   }
+  if (patch.parentCardId !== undefined) {
+    // Need the child's board_id to validate same-board. One short row
+    // lookup before staging the UPDATE.
+    const cur = await db
+      .prepare(`SELECT board_id FROM kanban_cards WHERE id = ?`)
+      .bind(id)
+      .first<{ board_id: number }>();
+    if (!cur) return null;
+    await validateParentAssignment(db, cur.board_id, id, patch.parentCardId);
+    sets.push('parent_card_id = ?');
+    binds.push(patch.parentCardId);
+  }
 
   const normalizedGroups =
     patch.groups !== undefined ? normalizeGroups(patch.groups) : undefined;
@@ -1770,10 +1938,13 @@ export async function updateCard(
       .bind(id, expectedVersion)
       .first<RawCardRow>();
     if (!row) return null;
+    const cc = await loadChildCountsForCard(db, id);
     return hydrateCard(
       row,
       await loadGroupsForCard(db, id),
-      await loadAssigneesForCard(db, id)
+      await loadAssigneesForCard(db, id),
+      cc.total,
+      cc.done
     );
   }
 
@@ -1828,7 +1999,8 @@ export async function updateCard(
 
   const finalGroups = await loadGroupsForCard(db, id);
   const finalAssignees = await loadAssigneesForCard(db, id);
-  return hydrateCard(row, finalGroups, finalAssignees);
+  const cc = await loadChildCountsForCard(db, id);
+  return hydrateCard(row, finalGroups, finalAssignees, cc.total, cc.done);
 }
 
 export interface AffectedPosition {
@@ -2009,8 +2181,9 @@ export async function moveCard(
 
   const movedGroups = await loadGroupsForCard(db, id);
   const movedAssignees = await loadAssigneesForCard(db, id);
+  const movedCc = await loadChildCountsForCard(db, id);
   return {
-    card: hydrateCard(movedRow, movedGroups, movedAssignees),
+    card: hydrateCard(movedRow, movedGroups, movedAssignees, movedCc.total, movedCc.done),
     fromColumn,
     toColumn,
     affected: (affectedRows.results ?? []).map((r) => ({
@@ -2130,8 +2303,15 @@ export async function archiveCard(
     .bind(current.board_id, current.column_name)
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
+  const archivedCc = await loadChildCountsForCard(db, id);
   return {
-    card: hydrateCard(row, await loadGroupsForCard(db, id), await loadAssigneesForCard(db, id)),
+    card: hydrateCard(
+      row,
+      await loadGroupsForCard(db, id),
+      await loadAssigneesForCard(db, id),
+      archivedCc.total,
+      archivedCc.done
+    ),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
       id: r.id,
@@ -2191,8 +2371,15 @@ export async function unarchiveCard(
     .bind(current.board_id, current.column_name)
     .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
 
+  const unarchivedCc = await loadChildCountsForCard(db, id);
   return {
-    card: hydrateCard(row, await loadGroupsForCard(db, id), await loadAssigneesForCard(db, id)),
+    card: hydrateCard(
+      row,
+      await loadGroupsForCard(db, id),
+      await loadAssigneesForCard(db, id),
+      unarchivedCc.total,
+      unarchivedCc.done
+    ),
     column: current.column_name,
     affected: (affectedRows.results ?? []).map((r) => ({
       id: r.id,
@@ -2217,7 +2404,9 @@ export type CardEventKind =
   | 'card.moved'
   | 'card.archived'
   | 'card.unarchived'
-  | 'card.deleted';
+  | 'card.deleted'
+  | 'card.parent_set'
+  | 'card.parent_cleared';
 
 export interface CardEventDto {
   id: number;
@@ -2628,4 +2817,90 @@ export async function getComment(
     .bind(id)
     .first<RawCommentRow & { author_display_name: string | null }>();
   return row ? hydrateComment(row, row.author_display_name) : null;
+}
+
+// ── Parent/child queries + bulk tree create (added 2026-05) ────────────
+
+/** Lightweight summary row for the modal's "Children" list. We don't
+ *  need full CardDto (no groups, no notes, no assignees, no
+ *  grandchildren) — just the few fields needed to render a linked row
+ *  with column + completion. */
+export interface ChildCardSummary {
+  id: number;
+  title: string;
+  column: ColumnName;
+  archivedAt: string | null;
+}
+
+/** Direct (depth-1) active children of a parent card, ordered by
+ *  column then position so they read top-to-bottom on the board. */
+export async function listChildCards(
+  db: D1Database,
+  parentCardId: number
+): Promise<ChildCardSummary[]> {
+  const res = await db
+    .prepare(
+      `SELECT id, title, column_name, archived_at FROM kanban_cards
+       WHERE parent_card_id = ? AND archived_at IS NULL
+       ORDER BY column_name ASC, position ASC, id ASC`
+    )
+    .bind(parentCardId)
+    .all<{ id: number; title: string; column_name: ColumnName; archived_at: string | null }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    title: r.title,
+    column: r.column_name,
+    archivedAt: r.archived_at,
+  }));
+}
+
+/** Recursive node shape produced by the outline parser. The bulk
+ *  creator walks this tree depth-first, threading the freshly-minted
+ *  parent_card_id into each child. */
+export interface OutlineNode {
+  title: string;
+  notes: string | null;
+  children: OutlineNode[];
+}
+
+export interface BulkCreateTreeResult {
+  /** Flat list of every card created, in DFS order. The first entry is
+   *  always the root if the input had a single root. */
+  created: CardDto[];
+}
+
+/** Create a tree of cards on a board. All cards land in the same target
+ *  column; the staff user moves them around afterward. Each node's
+ *  parent_card_id points to the freshly-inserted id of its parent.
+ *  Errors abort partway — the caller treats the operation as best-
+ *  effort and reports the count actually created. */
+export async function bulkCreateCardTree(
+  db: D1Database,
+  boardId: number,
+  column: ColumnName,
+  tree: OutlineNode[],
+  userId: number | null
+): Promise<BulkCreateTreeResult> {
+  const created: CardDto[] = [];
+  async function walk(nodes: OutlineNode[], parentId: number | null): Promise<void> {
+    for (const node of nodes) {
+      const card = await createCard(
+        db,
+        boardId,
+        {
+          column,
+          title: node.title,
+          notes: node.notes,
+          parentCardId: parentId,
+        },
+        userId
+      );
+      created.push(card);
+      if (node.children.length > 0) {
+        await walk(node.children, card.id);
+      }
+    }
+  }
+  await walk(tree, null);
+  return { created };
 }

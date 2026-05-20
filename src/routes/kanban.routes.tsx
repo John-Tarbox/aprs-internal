@@ -23,7 +23,10 @@ import { requireRole } from '../middleware/auth';
 import { KanbanPage } from '../pages/KanbanPage';
 import { KanbanBoardListPage } from '../pages/KanbanBoardListPage';
 import { BulkImportPage } from '../pages/BulkImportPage';
+import { OutlineImportPage } from '../pages/OutlineImportPage';
 import { commitImport, parseImportCsv } from '../services/bulk_import.service';
+import { parseOutline } from '../services/outline_import.service';
+import type { KanbanBoardDO } from '../durable/kanban.do';
 import {
   listBoards,
   getBoardBySlug,
@@ -391,6 +394,138 @@ kanbanRoutes.post('/:slug/import', requireRole('staff'), async (c) => {
     return c.redirect(
       `/kanban/${encodeURIComponent(slug)}/import?err=${encodeURIComponent('Import failed: ' + msg)}`,
       302
+    );
+  }
+});
+
+// ── Outline import (paste a Word/Docs outline → tree of cards) ─────────
+
+kanbanRoutes.get('/:slug/import-outline', requireRole('staff'), async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  const columns = await listBoardColumns(c.env.DB, board.id);
+  const flashKind = c.req.query('ok') ? 'ok' : c.req.query('err') ? 'err' : undefined;
+  const flashMsg = c.req.query('ok') ?? c.req.query('err') ?? undefined;
+  return c.html(
+    <OutlineImportPage
+      user={user}
+      board={board}
+      columns={columns}
+      flash={flashKind && flashMsg ? { kind: flashKind, message: flashMsg } : undefined}
+    />
+  );
+});
+
+kanbanRoutes.post('/:slug/import-outline', requireRole('staff'), async (c) => {
+  const user = c.get('user');
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.text('Board not found', 404);
+  const columns = await listBoardColumns(c.env.DB, board.id);
+
+  const form = await c.req.formData();
+  const action = String(form.get('action') ?? '').trim();
+  const outlineText = String(form.get('outline') ?? '');
+  const column = String(form.get('column') ?? '').trim();
+
+  // Validate column exists on this board. Cheap; surfaces a friendly error.
+  const colExists = columns.some((c2) => c2.columnName === column);
+  if (!colExists) {
+    return c.html(
+      <OutlineImportPage
+        user={user}
+        board={board}
+        columns={columns}
+        outlineText={outlineText}
+        selectedColumn={column}
+        flash={{ kind: 'err', message: 'Pick a target column from the dropdown.' }}
+      />
+    );
+  }
+  if (!outlineText.trim()) {
+    return c.html(
+      <OutlineImportPage
+        user={user}
+        board={board}
+        columns={columns}
+        outlineText={outlineText}
+        selectedColumn={column}
+        flash={{ kind: 'err', message: 'Outline is empty — paste something first.' }}
+      />
+    );
+  }
+
+  // Preview branch: parse and re-render the page with the tree.
+  if (action === 'preview') {
+    const parsed = parseOutline(outlineText);
+    return c.html(
+      <OutlineImportPage
+        user={user}
+        board={board}
+        columns={columns}
+        outlineText={outlineText}
+        selectedColumn={column}
+        preview={parsed}
+      />
+    );
+  }
+
+  // Commit branch: re-parse and write through the DO (so live sessions
+  // see the cards appear via the broadcast).
+  const parsed = parseOutline(outlineText);
+  if (parsed.tree.length === 0) {
+    return c.html(
+      <OutlineImportPage
+        user={user}
+        board={board}
+        columns={columns}
+        outlineText={outlineText}
+        selectedColumn={column}
+        preview={parsed}
+        flash={{ kind: 'err', message: 'Nothing to create — adjust your outline.' }}
+      />
+    );
+  }
+  const doId = c.env.KANBAN_DO.idFromName('board-' + board.id);
+  const stub = c.env.KANBAN_DO.get(doId) as unknown as DurableObjectStub<KanbanBoardDO>;
+  try {
+    const result = await stub.opBulkImportOutline(
+      { column, tree: parsed.tree },
+      user.id,
+      board.id
+    );
+    await writeAudit(c.env.DB, {
+      userId: user.id,
+      action: 'bulk.outline_import',
+      metadata: {
+        boardId: board.id,
+        column,
+        createdCount: result.created.length,
+        maxDepth: parsed.maxDepth,
+        warnings: parsed.warnings,
+      },
+    });
+    const okMsg = `Created ${result.created.length} cards from outline${
+      parsed.warnings.length ? ' (' + parsed.warnings.join(' ') + ')' : ''
+    }.`;
+    return c.redirect(
+      `/kanban/${encodeURIComponent(board.slug)}?ok=${encodeURIComponent(okMsg)}`,
+      302
+    );
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    return c.html(
+      <OutlineImportPage
+        user={user}
+        board={board}
+        columns={columns}
+        outlineText={outlineText}
+        selectedColumn={column}
+        preview={parsed}
+        flash={{ kind: 'err', message: 'Import failed: ' + msg }}
+      />
     );
   }
 });
