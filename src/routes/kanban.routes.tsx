@@ -561,15 +561,31 @@ kanbanRoutes.post('/:slug/rename', requireRole('staff'), async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  const form = await c.req.formData();
-  const name = String(form.get('name') ?? '').trim();
+  // Accept either the existing HTML form (board picker's Manage form)
+  // or a JSON body (inline rename from the board page). The response
+  // shape mirrors the request shape — JSON → JSON, form → redirect.
+  const wantsJson = (c.req.header('accept') ?? '').includes('application/json');
+  let name = '';
+  if (wantsJson) {
+    const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+    name = String(body.name ?? '').trim();
+  } else {
+    const form = await c.req.formData();
+    name = String(form.get('name') ?? '').trim();
+  }
   if (!name || name.length > 100) {
+    if (wantsJson) {
+      return c.json({ error: 'Name is required (max 100 chars).' }, 400);
+    }
     return c.redirect(
       `/kanban?err=${encodeURIComponent('Name is required (max 100 chars).')}`,
       302
     );
   }
   await renameBoard(c.env.DB, board.id, name);
+  if (wantsJson) {
+    return c.json({ ok: true, board: { id: board.id, slug: board.slug, name } });
+  }
   return c.redirect(`/kanban?ok=${encodeURIComponent('Board renamed.')}`, 302);
 });
 

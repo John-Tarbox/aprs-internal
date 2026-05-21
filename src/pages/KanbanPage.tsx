@@ -66,7 +66,11 @@ export const KanbanPage: FC<KanbanPageProps> = ({
       <style>{kanbanCss}</style>
       <div class="kanban-head">
         <a class="kanban-back" href="/kanban" aria-label="Back to board list">← All boards</a>
-        <h1>{board.name}</h1>
+        <h1
+          id="kanban-board-title"
+          class={isStaff ? 'kanban-board-title kanban-board-title-editable' : 'kanban-board-title'}
+          title={isStaff ? 'Click to rename this board' : undefined}
+        >{board.name}</h1>
         <span id="kanban-status" class="kanban-status kanban-status-pending">Connecting…</span>
         <button id="kanban-templates-btn" class="btn" type="button" title="Card templates">
           Templates
@@ -419,6 +423,20 @@ const kanbanCss = `
 
   .kanban-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .kanban-head h1 { margin: 0; }
+  /* Inline board-rename UX (staff only). The H1 becomes clickable; on
+     click it swaps into a text input for editing. Subtle hover hint so
+     the affordance is discoverable without being noisy when nobody's
+     interacting. */
+  .kanban-board-title-editable { cursor: text; border-radius: 4px; padding: 0 4px; margin: 0 -4px; }
+  .kanban-board-title-editable:hover {
+    background: rgba(128,128,128,0.12);
+  }
+  .kanban-board-title-input {
+    font: inherit; color: inherit; margin: 0;
+    background: rgba(128,128,128,0.08);
+    border: 1px solid rgba(128,128,128,0.4); border-radius: 4px;
+    padding: 0 6px; min-width: 200px;
+  }
   .kanban-back { text-decoration: none; color: inherit; opacity: 0.7; font-size: 0.9em; }
   .kanban-back:hover { opacity: 1; text-decoration: underline; }
   .kanban-status { font-size: 0.85em; padding: 4px 10px; border-radius: 999px; }
@@ -4967,6 +4985,72 @@ const kanbanClientJs = `
 
   setupSortable();
   connect();
+
+  // --- Inline board rename (staff only) ---
+  // The H1 acts as a click-target; the click handler swaps it for a
+  // text input, posts JSON to the existing /:slug/rename endpoint on
+  // commit, and updates the H1 + document.title in place on success.
+  // Other open browser tabs see the new name on their next refresh —
+  // we don't broadcast through the DO because boards rename rarely
+  // and the extra wire / wiring cost isn't worth it.
+  var boardTitleEl = document.getElementById('kanban-board-title');
+  if (boardTitleEl && currentUser.isStaff) {
+    boardTitleEl.addEventListener('click', function() {
+      if (boardTitleEl.querySelector('input')) return; // already editing
+      var current = boardTitleEl.textContent || '';
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'kanban-board-title-input';
+      input.value = current;
+      input.maxLength = 100;
+      input.setAttribute('aria-label', 'Rename board');
+      // Replace the heading contents with the input. We restore the
+      // text node (with the latest server-acked name) on commit/cancel.
+      boardTitleEl.textContent = '';
+      boardTitleEl.appendChild(input);
+      input.focus();
+      input.select();
+
+      function restore(text) {
+        boardTitleEl.textContent = text;
+      }
+      function cancel() { restore(current); }
+      function commit() {
+        var next = input.value.trim();
+        if (!next) { cancel(); return; }
+        if (next === current) { cancel(); return; }
+        // Optimistically display the new name; on failure, restore.
+        boardTitleEl.textContent = next;
+        var slug = (boardEl.getAttribute('data-board-slug') || '').trim();
+        fetch('/kanban/' + encodeURIComponent(slug) + '/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ name: next }),
+        })
+          .then(function(r) {
+            if (!r.ok) return r.json().then(function(j) { throw new Error(j && j.error || ('HTTP ' + r.status)); });
+            return r.json();
+          })
+          .then(function() {
+            // Update the browser tab title to match. We don't have a
+            // cross-tab broadcast, so other open tabs will catch up on
+            // next refresh.
+            document.title = document.title.replace(/Kanban · .*$/, 'Kanban · ' + next);
+            showToast('Board renamed.', 2500);
+          })
+          .catch(function(err) {
+            showToast('Could not rename: ' + (err.message || 'server error'), 4000);
+            restore(current);
+          });
+      }
+      input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      });
+      input.addEventListener('blur', commit);
+    });
+  }
 
   // --- Board height: measure rather than guess ---
   // Replaces the old calc(100vh - 220px). The board's height = viewport
