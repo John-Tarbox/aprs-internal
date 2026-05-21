@@ -766,6 +766,11 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
     },
     async ({ boardSlug, columnKey, outline }, extra) => {
       const props = requireProps(extra);
+      // Match the staff gate on /kanban/:slug/import-outline. Outline
+      // import is a bulk operation (up to MAX_OUTLINE_CARDS at a time);
+      // keep it consistent with the web restriction even though
+      // single-card creation is open to all signed-in users.
+      if (!props.isStaff) return toolErr('forbidden: import_outline requires staff role');
       const board = await resolveBoardOrThrow(env, boardSlug);
       const parsed = parseOutline(outline);
       if (parsed.tree.length === 0) {
