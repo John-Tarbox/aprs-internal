@@ -26,6 +26,7 @@ import {
   listCards,
   listChildCards,
   listGroupsForBoard,
+  renameBoard,
   type BoardDto,
 } from '../services/kanban.service';
 import { commitImport, parseImportCsv } from '../services/bulk_import.service';
@@ -236,6 +237,34 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
         }
         return toolErr(`create_failed: ${msg}`);
       }
+    }
+  );
+
+  server.registerTool(
+    'rename_board',
+    {
+      description:
+        "Rename a board. Keeps the slug (URL) unchanged so existing bookmarks keep working. Staff only.",
+      inputSchema: {
+        boardSlug: z.string().min(1),
+        name: z.string().min(1).max(100),
+      },
+    },
+    async ({ boardSlug, name }, extra) => {
+      const props = requireProps(extra);
+      if (!props.isStaff) return toolErr('forbidden: rename_board requires staff role');
+      const board = await resolveBoardOrThrow(env, boardSlug);
+      await renameBoard(env.DB, board.id, name);
+      // Live-broadcast to anyone currently viewing this board — same
+      // best-effort pattern as the HTTP rename route. The DB write
+      // already succeeded; broadcast failure is recoverable on refresh.
+      try {
+        const stub = getBoardDOStub(env, board.id);
+        await stub.opBroadcastBoardRenamed(name);
+      } catch {
+        // No-op.
+      }
+      return toolOk({ id: board.id, slug: board.slug, name });
     }
   );
 
