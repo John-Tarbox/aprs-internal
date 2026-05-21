@@ -220,7 +220,7 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
               <li><code>add_comment</code> — including <code>@mention</code> notifications</li>
               <li><code>add_checklist_item</code> · <code>set_checklist_item</code> · <code>delete_checklist_item</code></li>
               <li><code>list_card_children</code> — direct children of a parent card (returns id, title, column, archived state)</li>
-              <li><code>import_outline</code> — paste a hierarchical outline (Word's <code>1./a./i./1.</code> markers, indentation, or <code>1.2.3</code> dotted-numeric prefixes); creates a tree of cards in one round-trip with parent/child links wired up</li>
+              <li><code>import_outline</code> <em>(staff only)</em> — paste a hierarchical outline (Word's <code>1./a./i./1.</code> markers, indentation, or <code>1.2.3</code> dotted-numeric prefixes); creates a tree of cards in one round-trip with parent/child links wired up</li>
             </ul>
 
             <h3 class="guide-h3">Columns (staff only)</h3>
@@ -251,9 +251,10 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
               </li>
               <li>
                 Only <strong>staff</strong> can create boards, do bulk
-                CSV imports, manage columns, or manage labels. If a
-                non-staff user asks Claude to do one of those, the tool
-                returns <code>forbidden</code> and Claude reports it.
+                CSV imports, import an outline, manage columns, or
+                manage labels. If a non-staff user asks Claude to do one
+                of those, the tool returns <code>forbidden</code> and
+                Claude reports it.
               </li>
               <li>
                 Every change is written to the same audit log as
