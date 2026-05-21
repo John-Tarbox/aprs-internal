@@ -37,6 +37,10 @@ interface KanbanPageProps {
   /** Hard cap on columns per board. Mirrored to the client so the add-
    *  column UI can self-disable at the limit without a round-trip. */
   maxBoardColumns: number;
+  /** Lightweight directory of all boards (id/slug/name) for the
+   *  "Move to another board" picker in the card modal. Columns for the
+   *  picked destination are loaded lazily via /kanban/<slug>/columns.json. */
+  allBoards: BoardDto[];
 }
 
 /** Legacy default — kept only as a server-side fallback if a board has
@@ -58,6 +62,7 @@ export const KanbanPage: FC<KanbanPageProps> = ({
   knownUsers,
   columns,
   maxBoardColumns,
+  allBoards,
 }) => {
   const cols = columns.length > 0 ? columns : FALLBACK_COLUMNS;
   const isStaff = user.roles.includes('admin') || user.roles.includes('staff');
@@ -316,10 +321,36 @@ export const KanbanPage: FC<KanbanPageProps> = ({
                 <p id="kf-activity-empty" class="kf-activity-empty" hidden>No activity yet.</p>
               </div>
             </section>
+            <section id="kf-movetoboard" class="kf-movetoboard" hidden aria-label="Move to another board">
+              <h3 class="kf-movetoboard-title">Move to another board</h3>
+              <p class="muted kf-movetoboard-help">
+                Moves this card (with comments, checklist, attachments, assignees, and dates) to a different board.
+                Labels are <strong>dropped</strong>, the parent link (if any) is <strong>severed</strong>, and cards
+                with children can't be moved — move children first.
+              </p>
+              <div class="kf-movetoboard-row">
+                <label class="kf-movetoboard-cell">Target board
+                  <select id="kf-movetoboard-board">
+                    <option value="">— pick a board —</option>
+                  </select>
+                </label>
+                <label class="kf-movetoboard-cell">Target column
+                  <select id="kf-movetoboard-column" disabled>
+                    <option value="">— pick the board first —</option>
+                  </select>
+                </label>
+              </div>
+              <p id="kf-movetoboard-warn" class="kf-movetoboard-warn" hidden></p>
+              <div class="kf-movetoboard-actions">
+                <button type="button" id="kf-movetoboard-cancel" class="btn">Cancel</button>
+                <button type="button" id="kf-movetoboard-confirm" class="btn btn-primary" disabled>Move card</button>
+              </div>
+            </section>
             <p id="kf-error" class="kanban-error" hidden></p>
             <div class="kanban-modal-actions">
               <button type="button" id="kf-cancel" class="btn">Cancel</button>
               <button type="button" id="kf-save-template" class="btn" hidden title="Save this card as a reusable template">Save as template</button>
+              <button type="button" id="kf-movetoboard-open" class="btn" hidden title="Move this card to a different board">Move to board</button>
               <button type="button" id="kf-archive" class="btn kanban-btn-danger" hidden>Archive</button>
               <button type="button" id="kf-restore" class="btn" hidden>Restore</button>
               <button type="submit" id="kf-save" class="btn btn-primary">Save</button>
@@ -395,6 +426,13 @@ export const KanbanPage: FC<KanbanPageProps> = ({
       </script>
       <script type="application/json" id="kanban-max-columns">
         {raw(JSON.stringify(maxBoardColumns))}
+      </script>
+      <script type="application/json" id="kanban-all-boards">
+        {raw(
+          JSON.stringify(
+            allBoards.map((b) => ({ id: b.id, slug: b.slug, name: b.name }))
+          ).replace(/<\//g, '<\\/')
+        )}
       </script>
 
       {/* SortableJS is pinned to a specific version. For stricter security posture,
@@ -703,6 +741,31 @@ const kanbanCss = `
   .kf-notes-hint {
     display: block; font-size: 0.75em; opacity: 0.6; margin-top: 2px;
   }
+
+  /* Cross-board move panel (added 2026-05-21). */
+  .kf-movetoboard {
+    margin-top: 16px; padding: 12px;
+    border: 1px solid rgba(234, 88, 12, 0.35);
+    border-radius: 6px;
+    background: rgba(234, 88, 12, 0.06);
+  }
+  .kf-movetoboard[hidden] { display: none; }
+  .kf-movetoboard-title { margin: 0 0 6px 0; font-size: 0.95em; font-weight: 600; }
+  .kf-movetoboard-help { margin: 0 0 10px 0; font-size: 0.85em; line-height: 1.45; }
+  .kf-movetoboard-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end;
+    margin: 8px 0;
+  }
+  .kf-movetoboard-cell { font-size: 0.85em; display: flex; flex-direction: column; }
+  .kf-movetoboard-cell select { margin-top: 2px; font: inherit; }
+  .kf-movetoboard-warn {
+    margin: 6px 0 0 0; padding: 6px 10px; font-size: 0.85em;
+    background: rgba(234, 179, 8, 0.12);
+    border-left: 3px solid rgba(234, 179, 8, 0.55);
+    border-radius: 3px;
+  }
+  .kf-movetoboard-warn[hidden] { display: none; }
+  .kf-movetoboard-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 
   /* Parent / Children section in the card modal (added 2026-05). */
   .kf-parent {
@@ -1312,6 +1375,14 @@ const kanbanClientJs = `
   var archiveBtn = document.getElementById('kf-archive');
   var restoreBtn = document.getElementById('kf-restore');
   var saveBtn = document.getElementById('kf-save');
+  // Cross-board move (added 2026-05-21).
+  var moveBoardSectionEl = document.getElementById('kf-movetoboard');
+  var moveBoardOpenBtn = document.getElementById('kf-movetoboard-open');
+  var moveBoardCancelBtn = document.getElementById('kf-movetoboard-cancel');
+  var moveBoardConfirmBtn = document.getElementById('kf-movetoboard-confirm');
+  var moveBoardBoardSelect = document.getElementById('kf-movetoboard-board');
+  var moveBoardColumnSelect = document.getElementById('kf-movetoboard-column');
+  var moveBoardWarnEl = document.getElementById('kf-movetoboard-warn');
   // Hide-until-add affordances (added 2026-05).
   var datesRowEl = document.getElementById('kf-dates-row');
   var datesAddBtn = document.getElementById('kf-dates-add');
@@ -3991,6 +4062,9 @@ const kanbanClientJs = `
     archiveBtn.hidden = true;
     restoreBtn.hidden = true;
     saveTemplateBtn.hidden = true;
+    // Cross-board move: not applicable for a brand-new card (no id yet).
+    moveBoardOpenBtn.hidden = true;
+    moveBoardSectionEl.hidden = true;
     // No card id yet → nothing to show on any optional section. Keep
     // them hidden and surface the small "+ Add X" affordances. Activity
     // doesn't apply to a brand-new card (no events yet).
@@ -4061,6 +4135,10 @@ const kanbanClientJs = `
     // active cards; Restore only appears for archived ones.
     archiveBtn.hidden = editingArchived;
     restoreBtn.hidden = !editingArchived;
+    // Cross-board move: staff-only, active cards only, and only when
+    // we have more than one board (otherwise there's nowhere to move).
+    moveBoardOpenBtn.hidden = !currentUser.isStaff || editingArchived || allBoardsList.length <= 1;
+    moveBoardSectionEl.hidden = true; // collapsed by default; user opens via the button
     // Templates can be saved from any active card (not from archived).
     saveTemplateBtn.hidden = editingArchived;
     // Dates: show the row up-front if any date is already set on the
@@ -4526,9 +4604,24 @@ const kanbanClientJs = `
       case 'card_deleted':
         // Hard-delete path (not wired to the UI but can still arrive from
         // an admin tool or a stale client). Purge from both maps.
+        // Also fires for cross-board move on the source DO — same
+        // semantics from the source-board UI's perspective.
         removeCardNode(msg.id);
         archivedCards.delete(msg.id);
         if (!archiveSectionEl.hidden) renderArchived();
+        return;
+      case 'card_positions':
+        // Position-only update for cards already on the board. Used by
+        // the source DO after a cross-board move to dense-shift the
+        // source column. Carries no card object, just (id, column,
+        // position, version) tuples.
+        if (Array.isArray(msg.positions)) {
+          msg.positions.forEach(function(p) {
+            var c = cards.get(p.id);
+            if (c) { c.column = p.column; c.position = p.position; c.version = p.version; }
+          });
+          renderAll();
+        }
         return;
       case 'card_archived':
         // Remove from the board; add to the archive drawer. The payload
@@ -4920,12 +5013,39 @@ const kanbanClientJs = `
         }
         return;
       case 'ack':
+        var ackPending = pendingClientMsgs.get(msg.clientMsgId);
         pendingClientMsgs.delete(msg.clientMsgId);
+        // Cross-board move success: card has left this board. The
+        // server's card_deleted broadcast already removes the tile;
+        // close the modal and toast the success.
+        if (ackPending && ackPending.type === 'move_to_board') {
+          if (!modalEl.hidden) closeModal();
+          showToast('Card moved to ' + ackPending.targetSlug + '.', 3500);
+          return;
+        }
         if (!modalEl.hidden && saveBtn.disabled) closeModal();
         return;
       case 'nack':
         var pending = pendingClientMsgs.get(msg.clientMsgId);
         pendingClientMsgs.delete(msg.clientMsgId);
+        // Cross-board move nacks: surface the specific reason as a
+        // toast and re-enable the confirm button so the user can fix
+        // the input (e.g. detach children) and retry without closing.
+        if (pending && pending.type === 'move_to_board') {
+          if (msg.reason === 'forbidden') {
+            showToast('Moving a card to another board is staff-only.', 4000);
+          } else if (msg.reason === 'version_conflict') {
+            showToast('Card was updated by someone else — re-open and try again.', 5000);
+            if (!modalEl.hidden) closeModal();
+          } else {
+            // OpInvalidError uses the message as the reason — likely
+            // "This card has children — move or detach them first."
+            // or "Target column \"x\" not found on the destination board."
+            showToast(String(msg.reason || 'Move failed.'), 5000);
+          }
+          if (moveBoardConfirmBtn) moveBoardConfirmBtn.disabled = false;
+          return;
+        }
         // Column-management nacks aren't modal-bound, so route them to
         // toast messages with reason-specific text.
         if (pending && (pending.type === 'add_column' || pending.type === 'rename_column' || pending.type === 'delete_column' || pending.type === 'move_column')) {
@@ -4999,6 +5119,195 @@ const kanbanClientJs = `
 
   setupSortable();
   connect();
+
+  // --- Cross-board move (staff only) ---
+  // Boards directory (id/slug/name) for the destination picker. Parsed
+  // once from a JSON island; columns for the chosen destination board
+  // are loaded lazily via /kanban/<slug>/columns.json on selection.
+  var allBoardsList = [];
+  try {
+    var abRaw = document.getElementById('kanban-all-boards');
+    if (abRaw && abRaw.textContent) allBoardsList = JSON.parse(abRaw.textContent) || [];
+  } catch (_e) { allBoardsList = []; }
+
+  function populateMoveBoardOptions() {
+    // Rebuild the destination-board <select> each modal open so the
+    // current board is correctly excluded (board could change if user
+    // opens a card from a deep-link redirector, etc.).
+    while (moveBoardBoardSelect.firstChild) {
+      moveBoardBoardSelect.removeChild(moveBoardBoardSelect.firstChild);
+    }
+    var placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '— pick a board —';
+    moveBoardBoardSelect.appendChild(placeholder);
+    var currentSlug = (boardEl.getAttribute('data-board-slug') || '').trim();
+    for (var i = 0; i < allBoardsList.length; i++) {
+      var b = allBoardsList[i];
+      if (b.slug === currentSlug) continue;
+      var opt = document.createElement('option');
+      opt.value = b.slug;
+      opt.textContent = b.name;
+      opt.setAttribute('data-board-id', String(b.id));
+      moveBoardBoardSelect.appendChild(opt);
+    }
+  }
+
+  function updateMoveBoardWarning() {
+    // Surface label-drop + parent-severed implications BEFORE the user
+    // clicks Move. Pull state from the card currently being edited.
+    if (editingCardId === null) {
+      moveBoardWarnEl.hidden = true;
+      return;
+    }
+    var card = cards.get(editingCardId);
+    if (!card) { moveBoardWarnEl.hidden = true; return; }
+    var msgs = [];
+    if (Array.isArray(card.groups) && card.groups.length > 0) {
+      var labelNames = card.groups.map(function(g) {
+        return (g && typeof g === 'object') ? g.name : g;
+      });
+      msgs.push('Labels will be dropped: ' + labelNames.join(', '));
+    }
+    if (card.parentCardId) {
+      msgs.push('The parent link will be severed (this card becomes top-level on the destination).');
+    }
+    if (typeof card.childCount === 'number' && card.childCount > 0) {
+      msgs.push('This card has ' + card.childCount + ' child' + (card.childCount === 1 ? '' : 'ren') + ' — the move will be rejected. Move children first or detach them.');
+    }
+    if (msgs.length > 0) {
+      moveBoardWarnEl.textContent = msgs.join('  ·  ');
+      moveBoardWarnEl.hidden = false;
+    } else {
+      moveBoardWarnEl.hidden = true;
+    }
+  }
+
+  function openMoveBoardPanel() {
+    if (editingCardId === null || editingArchived) return;
+    populateMoveBoardOptions();
+    moveBoardColumnSelect.disabled = true;
+    while (moveBoardColumnSelect.firstChild) {
+      moveBoardColumnSelect.removeChild(moveBoardColumnSelect.firstChild);
+    }
+    var ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = '— pick the board first —';
+    moveBoardColumnSelect.appendChild(ph);
+    moveBoardConfirmBtn.disabled = true;
+    updateMoveBoardWarning();
+    moveBoardSectionEl.hidden = false;
+  }
+
+  function closeMoveBoardPanel() {
+    moveBoardSectionEl.hidden = true;
+  }
+
+  function maybeEnableConfirm() {
+    var hasBoard = !!moveBoardBoardSelect.value;
+    var hasColumn = !!moveBoardColumnSelect.value;
+    moveBoardConfirmBtn.disabled = !(hasBoard && hasColumn);
+  }
+
+  moveBoardOpenBtn.addEventListener('click', openMoveBoardPanel);
+  moveBoardCancelBtn.addEventListener('click', closeMoveBoardPanel);
+
+  moveBoardBoardSelect.addEventListener('change', function() {
+    var slug = moveBoardBoardSelect.value;
+    moveBoardColumnSelect.disabled = true;
+    while (moveBoardColumnSelect.firstChild) {
+      moveBoardColumnSelect.removeChild(moveBoardColumnSelect.firstChild);
+    }
+    if (!slug) {
+      var ph2 = document.createElement('option');
+      ph2.value = '';
+      ph2.textContent = '— pick the board first —';
+      moveBoardColumnSelect.appendChild(ph2);
+      maybeEnableConfirm();
+      return;
+    }
+    // Loading state while we fetch the destination board's columns.
+    var loadingOpt = document.createElement('option');
+    loadingOpt.value = '';
+    loadingOpt.textContent = 'Loading…';
+    moveBoardColumnSelect.appendChild(loadingOpt);
+    fetch('/kanban/' + encodeURIComponent(slug) + '/columns.json', {
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        while (moveBoardColumnSelect.firstChild) {
+          moveBoardColumnSelect.removeChild(moveBoardColumnSelect.firstChild);
+        }
+        var firstOpt = document.createElement('option');
+        firstOpt.value = '';
+        firstOpt.textContent = '— pick a column —';
+        moveBoardColumnSelect.appendChild(firstOpt);
+        var cols = (data && Array.isArray(data.columns)) ? data.columns : [];
+        cols.sort(function(a, b) { return a.position - b.position; });
+        cols.forEach(function(col) {
+          var o = document.createElement('option');
+          o.value = col.columnName;
+          o.textContent = col.label;
+          moveBoardColumnSelect.appendChild(o);
+        });
+        moveBoardColumnSelect.disabled = false;
+        maybeEnableConfirm();
+      })
+      .catch(function() {
+        while (moveBoardColumnSelect.firstChild) {
+          moveBoardColumnSelect.removeChild(moveBoardColumnSelect.firstChild);
+        }
+        var errOpt = document.createElement('option');
+        errOpt.value = '';
+        errOpt.textContent = 'Could not load columns';
+        moveBoardColumnSelect.appendChild(errOpt);
+        showToast('Could not load destination columns. Try again.', 4000);
+        maybeEnableConfirm();
+      });
+  });
+
+  moveBoardColumnSelect.addEventListener('change', maybeEnableConfirm);
+
+  moveBoardConfirmBtn.addEventListener('click', function() {
+    if (editingCardId === null) return;
+    var card = cards.get(editingCardId);
+    if (!card) return;
+    var targetSlug = moveBoardBoardSelect.value;
+    var targetCol = moveBoardColumnSelect.value;
+    if (!targetSlug || !targetCol) return;
+    // Look up the target board id from the data island.
+    var targetBoardId = null;
+    for (var i = 0; i < allBoardsList.length; i++) {
+      if (allBoardsList[i].slug === targetSlug) {
+        targetBoardId = allBoardsList[i].id;
+        break;
+      }
+    }
+    if (!targetBoardId) {
+      showToast('That board no longer exists. Refresh and try again.', 4000);
+      return;
+    }
+    moveBoardConfirmBtn.disabled = true;
+    var cmid = nextClientMsgId();
+    pendingClientMsgs.set(cmid, { type: 'move_to_board', id: editingCardId, targetSlug: targetSlug });
+    var ok = send({
+      type: 'move_card_to_board',
+      clientMsgId: cmid,
+      id: editingCardId,
+      version: card.version,
+      targetBoardId: targetBoardId,
+      targetColumnKey: targetCol,
+    });
+    if (!ok) {
+      moveBoardConfirmBtn.disabled = false;
+      showToast('Disconnected — try again when reconnected.', 4000);
+    }
+  });
 
   // --- Inline board rename (staff only) ---
   // The H1 acts as a click-target; the click handler swaps it for a

@@ -224,6 +224,7 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
               <li><code>create_card</code> — new card with title, notes, labels, assignees, dates, and an optional <code>parentCardId</code> to nest it under another card</li>
               <li><code>update_card</code> — edit any card field, including reassigning the parent via <code>parentCardId</code> (uses optimistic-concurrency versions)</li>
               <li><code>move_card</code> — to a different column or position</li>
+              <li><code>move_card_to_board</code> <em>(staff only)</em> — move the card to a different board. Labels are dropped (board-scoped), the parent link (if any) is severed, and cards with children are rejected. Comments / checklist / attachments / assignees / dates travel with the card.</li>
               <li><code>archive_card</code> · <code>unarchive_card</code> · <code>delete_card</code> <em>(admin only — prefer archive)</em></li>
               <li><code>add_comment</code> — including <code>@mention</code> notifications</li>
               <li><code>add_checklist_item</code> · <code>set_checklist_item</code> · <code>delete_checklist_item</code></li>

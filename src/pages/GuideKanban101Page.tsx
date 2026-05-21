@@ -179,6 +179,18 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
               your mind.
             </p>
             <p>
+              <strong>Move a card to another board (staff):</strong>{' '}
+              open the card and click <code>Move to board</code>. Pick
+              the destination board and column. Comments, checklist
+              items, attachments, assignees, and dates all travel with
+              the card; <strong>labels are dropped</strong> (they're
+              board-scoped) and any parent link is severed. Cards with
+              children can't be moved — detach or move the children
+              first. The card disappears from the source board and
+              appears on the destination, live, for everyone watching
+              either board.
+            </p>
+            <p>
               Every card with comments shows a <strong>💬 N</strong> badge
               on its tile, where N is the total. The badge brightens (bold
               and blue) when there are comments from other people that you

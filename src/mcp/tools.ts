@@ -438,6 +438,52 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
   );
 
   server.registerTool(
+    'move_card_to_board',
+    {
+      description:
+        "Move a card to a different board. Staff only. Labels are dropped (they're board-scoped); the card's parent link is severed if any; if the card has children, the move is rejected (move children first). All comments, checklist items, attachments, assignees, and dates travel with the card.",
+      inputSchema: {
+        cardId: z.number().int().positive(),
+        version: z.number().int().positive(),
+        targetBoardSlug: z.string().min(1),
+        targetColumnKey: z.string().min(1),
+      },
+    },
+    async ({ cardId, version, targetBoardSlug, targetColumnKey }, extra) => {
+      const props = requireProps(extra);
+      if (!props.isStaff) {
+        return toolErr('forbidden: move_card_to_board requires staff role');
+      }
+      const row = await env.DB
+        .prepare(`SELECT board_id FROM kanban_cards WHERE id = ?`)
+        .bind(cardId)
+        .first<{ board_id: number }>();
+      if (!row) return toolErr(`not_found: card ${cardId}`);
+      const target = await resolveBoardOrThrow(env, targetBoardSlug);
+      if (target.id === row.board_id) {
+        return toolErr(`invalid: target board is the same as the current board`);
+      }
+      // Route through the SOURCE board's DO — that's where the move
+      // op lives. The op reaches into the destination DO internally
+      // to broadcast there.
+      const stub = getBoardDOStub(env, row.board_id);
+      return runOp(() =>
+        stub.opMoveCardToBoard(
+          {
+            id: cardId,
+            version,
+            targetBoardId: target.id,
+            targetColumnKey,
+          },
+          props.userId,
+          props.isStaff,
+          row.board_id
+        )
+      );
+    }
+  );
+
+  server.registerTool(
     'archive_card',
     {
       description: 'Soft-delete (archive) a card. Reversible via unarchive_card.',
