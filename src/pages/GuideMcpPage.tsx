@@ -211,6 +211,13 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
               <li><code>rename_board</code> — change the display name; slug (URL) stays the same so bookmarks keep working. Open browser tabs see the new name live.</li>
               <li><code>bulk_import_cards</code> — drop up to 500 cards into a column from CSV</li>
             </ul>
+            <p class="muted" style="font-size: 0.88em;">
+              Deleting a board is intentionally <strong>not</strong>{' '}
+              exposed via MCP — board deletion is irreversible and the
+              web UI requires typing the slug to confirm. Use the
+              Manage form on <a href="/kanban">/kanban</a> if you really
+              mean it.
+            </p>
 
             <h3 class="guide-h3">Cards</h3>
             <ul class="guide-tools">
