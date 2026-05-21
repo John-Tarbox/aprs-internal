@@ -1709,4 +1709,13 @@ export class KanbanBoardDO extends DurableObject<Env> {
     this.broadcast({ type: 'group_color_updated', group });
     return group;
   }
+
+  /** Broadcast a board-name change to every connected socket. The
+   *  actual rename happens via the HTTP route (renameBoard service
+   *  call); this op is fire-and-forget for live-updating other tabs.
+   *  No DB write here — the route is the source of truth, this just
+   *  fans out the new name. */
+  async opBroadcastBoardRenamed(name: string): Promise<void> {
+    this.broadcast({ type: 'board_renamed', name });
+  }
 }

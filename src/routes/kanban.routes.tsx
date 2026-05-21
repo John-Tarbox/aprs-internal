@@ -583,6 +583,16 @@ kanbanRoutes.post('/:slug/rename', requireRole('staff'), async (c) => {
     );
   }
   await renameBoard(c.env.DB, board.id, name);
+  // Best-effort live broadcast — let any other tabs currently viewing
+  // this board update their H1 + tab title without a refresh. The DO
+  // RPC failing (cold start, etc.) doesn't fail the rename itself.
+  try {
+    const doId = c.env.KANBAN_DO.idFromName('board-' + board.id);
+    const stub = c.env.KANBAN_DO.get(doId) as unknown as DurableObjectStub<KanbanBoardDO>;
+    await stub.opBroadcastBoardRenamed(name);
+  } catch {
+    // No-op: DB write already succeeded; live update is bonus.
+  }
   if (wantsJson) {
     return c.json({ ok: true, board: { id: board.id, slug: board.slug, name } });
   }
