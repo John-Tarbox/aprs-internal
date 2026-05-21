@@ -78,6 +78,14 @@ export const GuideKanban101Page: FC<GuideKanban101PageProps> = ({ user }) => {
                 <strong>Staff</strong> can add, rename, recolor, reorder, and
                 delete the columns themselves.
               </li>
+              <li>
+                <strong>Staff</strong> can also <strong>rename the board</strong>{' '}
+                by clicking its title in the page header — type a new
+                name, press Enter to save, Escape to cancel. The URL
+                (the slug in <code>/kanban/&lt;slug&gt;</code>) stays
+                the same, so bookmarks keep working. Other open tabs
+                see the new name within a second, no refresh needed.
+              </li>
             </ul>
             <aside class="guide-tip">
               <strong>Pro tip:</strong> every change is broadcast in real
