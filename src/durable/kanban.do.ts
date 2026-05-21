@@ -1518,7 +1518,16 @@ export class KanbanBoardDO extends DurableObject<Env> {
     if (!existing) throw new OpNotFoundError();
     const ref = await deleteComment(this.env.DB, input.id, actorUserId, actorIsAdmin);
     if (!ref) throw new OpForbiddenError();
-    this.broadcast({ type: 'comment_deleted', id: ref.id, cardId: ref.cardId });
+    // Include authorUserId so clients can precisely update the per-viewer
+    // hasUnreadComments state when an unread comment is deleted before
+    // it's been seen — otherwise the unread dot would persist until the
+    // next snapshot.
+    this.broadcast({
+      type: 'comment_deleted',
+      id: ref.id,
+      cardId: ref.cardId,
+      authorUserId: existing.authorUserId,
+    });
     return ref;
   }
 

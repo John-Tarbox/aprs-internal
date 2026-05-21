@@ -443,8 +443,19 @@ export function parseOutline(input: string): OutlineParseResult {
     }
 
     const marker = line.marker;
-    // No marker AND no indent change → it's a continuation paragraph
-    // for the previous heading's notes.
+
+    // Indent-only mode: if the document has no markers anywhere, every
+    // non-blank line becomes a heading and depth = leading-tab/space
+    // count. This is the "pure outline" path — Word's Outline View
+    // copied as plain text often falls into this mode.
+    if (!anyMarker) {
+      pushHeading(Math.max(0, line.rawIndent), marker.text.slice(0, 200));
+      pendingBlank = false;
+      continue;
+    }
+
+    // Marker mode: lines without a marker are continuation paragraphs
+    // that flow into the previous heading's notes.
     if (marker.style === 'none') {
       const open = state.lastOpen;
       if (pendingBlank && open && open.notes) open.notes += '\n';
@@ -472,12 +483,6 @@ export function parseOutline(input: string): OutlineParseResult {
       // are actually the start of a deeper roman series.
       const promoted = disambiguateAlphaSingle(marker.style, marker.value, marker.literal);
       depth = placeInSeries(promoted.style, promoted.value);
-    }
-
-    // If markers don't apply at all (no markers in the entire doc),
-    // fall back to indentation for heading depth.
-    if (!anyMarker) {
-      depth = Math.max(0, line.rawIndent);
     }
 
     pushHeading(depth, marker.text.slice(0, 200));

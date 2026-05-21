@@ -241,7 +241,11 @@ export interface CardDto {
   groups: GroupDto[];
   /** Multi-assignee FK list (S5). Empty when nobody is assigned. */
   assignees: AssigneeDto[];
-  /** Legacy free-text assigned field (pre-S5). Retained alongside assignees. */
+  /** @deprecated Legacy free-text assigned field (pre-S5). The UI no
+   *  longer renders or accepts edits to this field as of 2026-05;
+   *  existing values flow through unchanged for backward compatibility.
+   *  Plan: drop the column in a future migration after auditing for
+   *  remaining non-null values. */
   assigned: string | null;
   notes: string | null;
   /** YYYY-MM-DD or null. Paired with dueDate to enable Timeline view. */

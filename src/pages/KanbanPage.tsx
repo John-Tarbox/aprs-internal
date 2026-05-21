@@ -534,10 +534,12 @@ const kanbanCss = `
     gap: 12px;
     margin-top: 16px;
     /* Constrain the board to whatever vertical space is left below the
-       page chrome (header, filter row, status). Columns scroll
-       internally past that. The calc subtracts an approximation of the
-       chrome above; tune if the header grows. */
-    height: calc(100vh - 220px);
+       page chrome (header, filter row, status, saved-filter chips, …).
+       The ResizeObserver/window-resize hook below sets style.height
+       at runtime based on the board's actual top offset, so the constant
+       used to be a guess that broke as chrome grew. The CSS default is
+       100vh as a safe fallback before the first measurement fires. */
+    height: 100vh;
     min-height: 320px;
     overflow-x: scroll;
     overflow-y: hidden;
@@ -4621,11 +4623,21 @@ const kanbanClientJs = `
         return;
       case 'comment_deleted':
         // Decrement the tile's commentCount so 💬 N stays in sync.
-        // The broadcast doesn't carry author info, so we can't update
-        // hasUnreadComments precisely — the next snapshot reconciles.
+        // The broadcast now carries authorUserId, so we can optimistically
+        // clear hasUnreadComments when the deleted comment was authored
+        // by someone *other* than the viewer — the most common case
+        // where the dot would otherwise linger. Next snapshot reconciles
+        // if there are other still-unread comments we don't know about.
         var deletedCard = cards.get(msg.cardId);
         if (deletedCard && typeof deletedCard.commentCount === 'number' && deletedCard.commentCount > 0) {
           deletedCard.commentCount -= 1;
+          if (
+            deletedCard.hasUnreadComments &&
+            typeof msg.authorUserId === 'number' &&
+            msg.authorUserId !== currentUser.id
+          ) {
+            deletedCard.hasUnreadComments = false;
+          }
           upsertCard(deletedCard);
         } else {
           var archivedDeleted = archivedCards.get(msg.cardId);
@@ -4955,5 +4967,28 @@ const kanbanClientJs = `
 
   setupSortable();
   connect();
+
+  // --- Board height: measure rather than guess ---
+  // Replaces the old calc(100vh - 220px). The board's height = viewport
+  // height minus its own top offset (header + filter row + saved-filter
+  // chips + anything else above), minus a small bottom margin so the
+  // horizontal scrollbar isn't pinned to the very last pixel.
+  function sizeBoardToViewport() {
+    if (!boardEl) return;
+    var rect = boardEl.getBoundingClientRect();
+    var topOffset = Math.max(0, rect.top + window.scrollY);
+    var bottomMargin = 16;
+    var newHeight = Math.max(320, window.innerHeight - topOffset - bottomMargin);
+    boardEl.style.height = newHeight + 'px';
+  }
+  sizeBoardToViewport();
+  window.addEventListener('resize', sizeBoardToViewport);
+  // Anything above the board can grow at runtime: saved-filter chips
+  // appear, the filter row wraps, the archive drawer expands. Observe
+  // the page body and re-measure on any layout change.
+  if (typeof ResizeObserver !== 'undefined') {
+    var ro = new ResizeObserver(function() { sizeBoardToViewport(); });
+    ro.observe(document.body);
+  }
 })();
 `;
