@@ -453,14 +453,19 @@ export function registerKanbanTools(server: McpServer, env: Env): void {
   server.registerTool(
     'delete_card',
     {
-      description: 'Permanently delete a card. Prefer archive_card unless the deletion is intended.',
+      description: 'Permanently delete a card. Admin only — prefer archive_card unless the deletion is intended and irreversible.',
       inputSchema: {
         cardId: z.number().int().positive(),
         version: z.number().int().positive(),
       },
     },
     async ({ cardId, version }, extra) => {
-      requireProps(extra);
+      const props = requireProps(extra);
+      // Hard-delete is irreversible and isn't exposed in the web UI at
+      // all (which only does archive). Gate behind admin so this stays
+      // an explicit, narrow path — staff can still archive cards via
+      // archive_card.
+      if (!props.isAdmin) return toolErr('forbidden: delete_card requires admin role');
       const row = await env.DB
         .prepare(`SELECT board_id FROM kanban_cards WHERE id = ?`)
         .bind(cardId)
