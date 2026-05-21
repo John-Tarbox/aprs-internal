@@ -216,7 +216,7 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
               <li><code>create_card</code> — new card with title, notes, labels, assignees, dates, and an optional <code>parentCardId</code> to nest it under another card</li>
               <li><code>update_card</code> — edit any card field, including reassigning the parent via <code>parentCardId</code> (uses optimistic-concurrency versions)</li>
               <li><code>move_card</code> — to a different column or position</li>
-              <li><code>archive_card</code> · <code>unarchive_card</code> · <code>delete_card</code></li>
+              <li><code>archive_card</code> · <code>unarchive_card</code> · <code>delete_card</code> <em>(admin only — prefer archive)</em></li>
               <li><code>add_comment</code> — including <code>@mention</code> notifications</li>
               <li><code>add_checklist_item</code> · <code>set_checklist_item</code> · <code>delete_checklist_item</code></li>
               <li><code>list_card_children</code> — direct children of a parent card (returns id, title, column, archived state)</li>
@@ -255,6 +255,12 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
                 manage labels. If a non-staff user asks Claude to do one
                 of those, the tool returns <code>forbidden</code> and
                 Claude reports it.
+              </li>
+              <li>
+                Only <strong>admins</strong> can hard-delete a card via{' '}
+                <code>delete_card</code>. Everyone else (staff included)
+                should use <code>archive_card</code> — archive is
+                reversible, delete is not.
               </li>
               <li>
                 Every change is written to the same audit log as
