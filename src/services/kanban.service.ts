@@ -2250,6 +2250,234 @@ export async function moveCard(
   };
 }
 
+// ── Cross-board move (added 2026-05-21) ────────────────────────────────
+
+/** Result of a successful cross-board move. The card itself is fully
+ *  reloaded (new boardId, new column, new position); positions on both
+ *  the source and destination columns are returned so each board's DO
+ *  can update its sockets' card maps without a fresh snapshot. */
+export interface MoveCardToBoardResult {
+  card: CardDto;
+  sourceBoardId: number;
+  sourceColumn: ColumnName;
+  /** Post-move positions of the remaining active cards in the source
+   *  column. Drives the source DO's broadcast. */
+  sourcePositions: AffectedPosition[];
+  /** Post-move positions in the destination column, including the
+   *  moved card itself. Drives the destination DO's broadcast. */
+  destPositions: AffectedPosition[];
+  /** Label names that were on the card on the source board but did not
+   *  exist on the destination board. The card-group rows for these are
+   *  dropped on move; the names are returned so the caller can surface
+   *  them in the UI / MCP response. */
+  droppedLabels: string[];
+  /** True if the card had a parent on the source board and the link
+   *  was severed by the move (parent stays on the source board; the
+   *  moved card becomes top-level on the destination). */
+  severedParent: boolean;
+}
+
+/** Reasons a cross-board move can be refused at the policy layer.
+ *  Surfaced to MCP as `invalid: <reason>`; the web UI shows a toast. */
+export class MoveCardToBoardError extends Error {
+  constructor(message: string, public readonly reason: 'has_children' | 'unknown_column' | 'unknown_board' | 'same_board') {
+    super(message);
+    this.name = 'MoveCardToBoardError';
+  }
+}
+
+/**
+ * Move a card to a different board.
+ *
+ * Policy (per design doc):
+ *  - Card with children is REJECTED (caller moves children first).
+ *  - Parent link is SEVERED on move (parent stays put; moved card
+ *    becomes a top-level item on the destination).
+ *  - Labels (`kanban_card_groups` rows) are DROPPED — labels are
+ *    board-scoped by name, and we don't auto-create on the destination.
+ *    The list of dropped label names is reported back so the UI can
+ *    show what was lost.
+ *  - The card lands at the end of the destination column. User can
+ *    drag from there. Source column is dense-shifted.
+ *  - Optimistic concurrency: `expectedVersion` guards against parallel
+ *    edits; null return means "version conflict / not found".
+ *
+ * All writes are batched in a single `db.batch()` for D1 atomicity.
+ */
+export async function moveCardToBoard(
+  db: D1Database,
+  cardId: number,
+  targetBoardId: number,
+  targetColumnKey: ColumnName,
+  expectedVersion: number,
+  userId: number | null
+): Promise<MoveCardToBoardResult | null> {
+  const current = await db
+    .prepare(
+      `SELECT board_id, column_name, position, version, parent_card_id, archived_at
+         FROM kanban_cards WHERE id = ?`
+    )
+    .bind(cardId)
+    .first<{
+      board_id: number;
+      column_name: ColumnName;
+      position: number;
+      version: number;
+      parent_card_id: number | null;
+      archived_at: string | null;
+    }>();
+  if (!current) return null;
+  if (current.version !== expectedVersion) return null;
+  // Archived cards can be moved too in principle, but the position
+  // logic below assumes active. Disallow until there's a clear user
+  // story for archived cross-board move.
+  if (current.archived_at) return null;
+
+  if (current.board_id === targetBoardId) {
+    throw new MoveCardToBoardError(
+      'Target board is the same as the current board.',
+      'same_board'
+    );
+  }
+  // Target board must exist (defensive — caller should have resolved
+  // it, but cheap to recheck).
+  const tb = await db
+    .prepare(`SELECT id FROM kanban_boards WHERE id = ?`)
+    .bind(targetBoardId)
+    .first<{ id: number }>();
+  if (!tb) {
+    throw new MoveCardToBoardError(`Target board ${targetBoardId} not found.`, 'unknown_board');
+  }
+  // Target column must exist on the target board.
+  if (!(await columnExists(db, targetBoardId, targetColumnKey))) {
+    throw new MoveCardToBoardError(
+      `Target column "${targetColumnKey}" not found on the destination board.`,
+      'unknown_column'
+    );
+  }
+  // Reject when the card has children. Surfacing this as a typed error
+  // (rather than null) lets the UI show a specific "move children
+  // first" message instead of a generic version-conflict toast.
+  const childrenRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM kanban_cards
+       WHERE parent_card_id = ? AND archived_at IS NULL`
+    )
+    .bind(cardId)
+    .first<{ n: number }>();
+  if ((childrenRow?.n ?? 0) > 0) {
+    throw new MoveCardToBoardError(
+      'This card has children — move or detach them first.',
+      'has_children'
+    );
+  }
+
+  // Capture the labels that will be dropped. Anything currently on the
+  // card whose name doesn't exist on the destination board's
+  // `kanban_groups` is reported back; the rest are also dropped because
+  // we don't currently support cross-board label-name mapping (would
+  // need a re-link, not just a name match, since colors are per-board).
+  const labelRows = await db
+    .prepare(`SELECT group_name FROM kanban_card_groups WHERE card_id = ?`)
+    .bind(cardId)
+    .all<{ group_name: string }>();
+  const droppedLabels = (labelRows.results ?? []).map((r) => r.group_name);
+
+  const severedParent = current.parent_card_id !== null;
+
+  // Stage all the writes in one batch.
+  const stmts = [
+    // 1. Move the card row.
+    db
+      .prepare(
+        `UPDATE kanban_cards
+         SET board_id = ?,
+             column_name = ?,
+             position = (
+               SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_cards
+                WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+             ),
+             parent_card_id = NULL,
+             version = version + 1,
+             updated_at = datetime('now'),
+             updated_by_user_id = ?
+         WHERE id = ? AND version = ?`
+      )
+      .bind(
+        targetBoardId,
+        targetColumnKey,
+        targetBoardId,
+        targetColumnKey,
+        userId,
+        cardId,
+        expectedVersion
+      ),
+    // 2. Drop label memberships (labels stay on the source board but
+    //    are no longer attached to this card).
+    db
+      .prepare(`DELETE FROM kanban_card_groups WHERE card_id = ?`)
+      .bind(cardId),
+    // 3. Close the gap in the source column.
+    db
+      .prepare(
+        `UPDATE kanban_cards SET position = position - 1
+         WHERE board_id = ? AND column_name = ? AND archived_at IS NULL
+           AND position > ?`
+      )
+      .bind(current.board_id, current.column_name, current.position),
+  ];
+  await db.batch(stmts);
+
+  // Reload the card from the (new) board for the result.
+  const movedRow = await db
+    .prepare(`SELECT * FROM kanban_cards WHERE id = ?`)
+    .bind(cardId)
+    .first<RawCardRow>();
+  if (!movedRow) return null;
+
+  // Affected positions on each side, for the two DO broadcasts.
+  const sourceAffected = await db
+    .prepare(
+      `SELECT id, column_name, position, version FROM kanban_cards
+       WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
+    )
+    .bind(current.board_id, current.column_name)
+    .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
+  const destAffected = await db
+    .prepare(
+      `SELECT id, column_name, position, version FROM kanban_cards
+       WHERE board_id = ? AND column_name = ? AND archived_at IS NULL`
+    )
+    .bind(targetBoardId, targetColumnKey)
+    .all<{ id: number; column_name: ColumnName; position: number; version: number }>();
+
+  // Hydrate using the new board context (no children, since we rejected
+  // that case; labels were dropped; comment count + assignees travel).
+  const assignees = await loadAssigneesForCard(db, cardId);
+  const cn = await loadCommentCountForCard(db, cardId);
+  const card = hydrateCard(movedRow, [], assignees, 0, 0, cn);
+
+  return {
+    card,
+    sourceBoardId: current.board_id,
+    sourceColumn: current.column_name,
+    sourcePositions: (sourceAffected.results ?? []).map((r) => ({
+      id: r.id,
+      column: r.column_name,
+      position: r.position,
+      version: r.version,
+    })),
+    destPositions: (destAffected.results ?? []).map((r) => ({
+      id: r.id,
+      column: r.column_name,
+      position: r.position,
+      version: r.version,
+    })),
+    droppedLabels,
+    severedParent,
+  };
+}
+
 /**
  * Hard-delete a card (destructive; retained for completeness but not wired
  * into the UI — the board uses `archiveCard` as its primary destructive
@@ -2465,7 +2693,8 @@ export type CardEventKind =
   | 'card.unarchived'
   | 'card.deleted'
   | 'card.parent_set'
-  | 'card.parent_cleared';
+  | 'card.parent_cleared'
+  | 'card.moved_board';
 
 export interface CardEventDto {
   id: number;

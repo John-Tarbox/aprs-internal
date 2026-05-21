@@ -257,10 +257,15 @@ kanbanRoutes.get('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const board = await getBoardBySlug(c.env.DB, slug);
   if (!board) return c.text('Board not found', 404);
-  const [boardGroups, knownUsers, columns] = await Promise.all([
+  const [boardGroups, knownUsers, columns, allBoards] = await Promise.all([
     listGroupsForBoard(c.env.DB, board.id),
     listActiveUserDirectory(c.env.DB),
     listBoardColumns(c.env.DB, board.id),
+    // All boards (id/slug/name only) for the "Move to another board"
+    // picker in the card modal. Columns for the chosen destination
+    // are fetched on demand via /kanban/<slug>/columns.json — keeps
+    // the initial payload small.
+    listBoards(c.env.DB),
   ]);
   return c.html(
     <KanbanPage
@@ -270,8 +275,29 @@ kanbanRoutes.get('/:slug', async (c) => {
       knownUsers={knownUsers}
       columns={columns}
       maxBoardColumns={MAX_BOARD_COLUMNS}
+      allBoards={allBoards}
     />
   );
+});
+
+// Lightweight JSON endpoint used by the card modal's "Move to another
+// board" UI to populate the destination column picker after the user
+// picks a target board. Keeps the initial page payload small (we only
+// embed id/slug/name for every board; columns are fetched lazily).
+kanbanRoutes.get('/:slug/columns.json', async (c) => {
+  const slug = c.req.param('slug');
+  const board = await getBoardBySlug(c.env.DB, slug);
+  if (!board) return c.json({ error: 'board not found' }, 404);
+  const columns = await listBoardColumns(c.env.DB, board.id);
+  return c.json({
+    boardId: board.id,
+    slug: board.slug,
+    columns: columns.map((col) => ({
+      columnName: col.columnName,
+      label: col.label,
+      position: col.position,
+    })),
+  });
 });
 
 kanbanRoutes.get('/:slug/ws', async (c) => {

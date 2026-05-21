@@ -45,6 +45,8 @@ import {
   logCardEvent,
   markCardViewed,
   moveCard,
+  moveCardToBoard,
+  MoveCardToBoardError,
   removeBoardColumn,
   renameBoardColumn,
   renameGroup,
@@ -207,6 +209,18 @@ const clientMsgSchema = z.discriminatedUnion('type', [
     version: z.number().int().positive(),
     toColumn: columnEnum,
     toPosition: z.number().int().min(0),
+  }),
+  z.object({
+    // Cross-board move (added 2026-05-21). Staff only. The card moves
+    // to another board's column; labels drop, parent link severs,
+    // children block the move. Source DO broadcasts card_deleted +
+    // remaining positions; destination DO broadcasts card_created.
+    type: z.literal('move_card_to_board'),
+    clientMsgId: z.string().max(64),
+    id: z.number().int().positive(),
+    version: z.number().int().positive(),
+    targetBoardId: z.number().int().positive(),
+    targetColumnKey: columnEnum,
   }),
   z.object({
     type: z.literal('delete_card'),
@@ -583,6 +597,25 @@ export class KanbanBoardDO extends DurableObject<Env> {
                 toPosition: parsed.toPosition,
               },
               attachment.userId
+            );
+            this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
+          } catch (err) {
+            this.sendOpError(ws, parsed.clientMsgId, err);
+          }
+          return;
+        }
+        case 'move_card_to_board': {
+          try {
+            await this.opMoveCardToBoard(
+              {
+                id: parsed.id,
+                version: parsed.version,
+                targetBoardId: parsed.targetBoardId,
+                targetColumnKey: parsed.targetColumnKey,
+              },
+              attachment.userId,
+              attachment.isStaff,
+              attachment.boardId
             );
             this.sendTo(ws, { type: 'ack', clientMsgId: parsed.clientMsgId, ok: true });
           } catch (err) {
@@ -1421,6 +1454,106 @@ export class KanbanBoardDO extends DurableObject<Env> {
       });
     }
     return result;
+  }
+
+  /** Cross-board move. Staff-only. The card disappears from this
+   *  (source) board and re-appears on the destination. We:
+   *  1. Call the service, which validates + does the atomic write.
+   *  2. Broadcast `card_deleted` + remaining-source positions to this
+   *     DO's sockets so the source-board UI removes the card.
+   *  3. Reach into the destination board's DO via `idFromName` and ask
+   *     it to broadcast `card_created` to ITS sockets.
+   *  4. Log a `card.moved_board` event on the card so the activity
+   *     timeline reflects the crossing. */
+  async opMoveCardToBoard(
+    input: {
+      id: number;
+      version: number;
+      targetBoardId: number;
+      targetColumnKey: ColumnName;
+    },
+    actorUserId: number,
+    actorIsStaff: boolean,
+    sourceBoardId: number
+  ): Promise<{
+    card: CardDto;
+    droppedLabels: string[];
+    severedParent: boolean;
+  }> {
+    if (!actorIsStaff) throw new OpForbiddenError();
+    let result: Awaited<ReturnType<typeof moveCardToBoard>>;
+    try {
+      result = await moveCardToBoard(
+        this.env.DB,
+        input.id,
+        input.targetBoardId,
+        input.targetColumnKey,
+        input.version,
+        actorUserId
+      );
+    } catch (err) {
+      // Map MoveCardToBoardError (policy reasons) onto OpInvalidError
+      // so the nack carries a useful message instead of db_error.
+      if (err instanceof MoveCardToBoardError) {
+        throw new OpInvalidError(err.message);
+      }
+      throw err;
+    }
+    if (!result) {
+      throw new OpVersionConflictError(await this.readVersion(input.id));
+    }
+    // Source-side broadcast: the card has left this board. The
+    // existing card_deleted handler on the client removes the tile.
+    // Also re-broadcast positions so the source column's tiles
+    // dense-shift correctly without waiting for a snapshot.
+    this.broadcast({ type: 'card_deleted', id: input.id });
+    if (result.sourcePositions.length > 0) {
+      this.broadcast({
+        type: 'card_positions',
+        positions: result.sourcePositions.map((p) => ({
+          id: p.id,
+          column: p.column,
+          position: p.position,
+          version: p.version,
+        })),
+      });
+    }
+    // Destination-side broadcast: ask the destination DO to announce
+    // the new card to its sockets. We don't await the result for any
+    // reason other than knowing it succeeded.
+    try {
+      const destId = this.env.KANBAN_DO.idFromName('board-' + input.targetBoardId);
+      const destStub = this.env.KANBAN_DO.get(destId) as unknown as DurableObjectStub<KanbanBoardDO>;
+      await destStub.opAnnounceIncomingCard(result.card);
+    } catch {
+      // No-op. DB write already succeeded; destination subscribers
+      // will catch up on their next snapshot.
+    }
+    // Activity log entry. The card's events follow the card row
+    // (card_id FK), so this event surfaces under the moved card on
+    // the destination board's activity timeline.
+    await this.emitCardEvent(result.card.id, actorUserId, 'card.moved_board', {
+      fromBoardId: sourceBoardId,
+      toBoardId: input.targetBoardId,
+      fromColumn: result.sourceColumn,
+      toColumn: result.card.column,
+      droppedLabels: result.droppedLabels,
+      severedParent: result.severedParent,
+    });
+    return {
+      card: result.card,
+      droppedLabels: result.droppedLabels,
+      severedParent: result.severedParent,
+    };
+  }
+
+  /** Called by another DO via cross-DO RPC when a card has moved INTO
+   *  this board. Broadcasts card_created to this DO's sockets so the
+   *  destination-board UI shows the new tile without waiting for a
+   *  snapshot refresh. No DB write — the move already happened on the
+   *  source DO's call to the service layer. */
+  async opAnnounceIncomingCard(card: CardDto): Promise<void> {
+    this.broadcast({ type: 'card_created', card });
   }
 
   async opDeleteCard(
