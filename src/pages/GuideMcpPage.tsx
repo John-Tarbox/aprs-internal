@@ -208,6 +208,7 @@ export const GuideMcpPage: FC<GuideMcpPageProps> = ({ user }) => {
             <h3 class="guide-h3">Boards (staff only)</h3>
             <ul class="guide-tools">
               <li><code>create_board</code> — new board with the canonical 6-column layout</li>
+              <li><code>rename_board</code> — change the display name; slug (URL) stays the same so bookmarks keep working. Open browser tabs see the new name live.</li>
               <li><code>bulk_import_cards</code> — drop up to 500 cards into a column from CSV</li>
             </ul>
 
