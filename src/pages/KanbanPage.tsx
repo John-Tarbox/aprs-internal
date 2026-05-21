@@ -4762,6 +4762,20 @@ const kanbanClientJs = `
           renderAll();
         }
         return;
+      case 'board_renamed':
+        // Server broadcast: the board's name changed. Update the H1 +
+        // browser tab title in every tab. If the local user is in the
+        // middle of typing in the rename input, leave their input
+        // alone — committing it (or pressing Escape) restores final
+        // truth either way.
+        if (typeof msg.name === 'string') {
+          var brTitle = document.getElementById('kanban-board-title');
+          if (brTitle && !brTitle.querySelector('input')) {
+            brTitle.textContent = msg.name;
+          }
+          document.title = document.title.replace(/Kanban · .*$/, 'Kanban · ' + msg.name);
+        }
+        return;
       case 'group_color_updated':
         if (msg.group && msg.group.name) {
           setGroupColorLocal(msg.group.name, msg.group.color);
